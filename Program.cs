@@ -1,11 +1,8 @@
 using System;
-using System.Collections.Generic;
 using System.IO;
-using System.Linq;
 using System.Text.Json;
 using System.Text.Json.Serialization;
-using Microsoft.CodeAnalysis;
-using Microsoft.CodeAnalysis.CSharp;
+using System.Collections.Generic;
 
 namespace CSharpDataFlowAnalyzer;
 
@@ -15,104 +12,43 @@ class Program
     {
         if (args.Length == 0 || args[0] is "-h" or "--help") { PrintUsage(); return 0; }
 
-        string? outputPath = null;
-        bool prettyPrint = true;
-        var inputPaths = new List<string>();
-
-        for (int i = 0; i < args.Length; i++)
-            switch (args[i])
-            {
-                case "-o" or "--output": if (i + 1 < args.Length) outputPath = args[++i]; break;
-                case "--compact": prettyPrint = false; break;
-                default: inputPaths.Add(args[i]); break;
-            }
-
-        var files = new List<string>();
-        foreach (var path in inputPaths)
-        {
-            if (Directory.Exists(path))
-                files.AddRange(Directory.GetFiles(path, "*.cs", SearchOption.AllDirectories));
-            else if (File.Exists(path))
-                files.Add(path);
-            else
-                Console.Error.WriteLine($"Warning: '{path}' not found — skipping.");
-        }
+        var parsed = ParsedArgs.Parse(args);
+        var files  = AnalyzerEngine.CollectFiles(parsed.InputPaths);
 
         if (files.Count == 0) { Console.Error.WriteLine("Error: no .cs files found."); return 1; }
 
         Console.Error.WriteLine($"Analyzing {files.Count} file(s)...");
 
-        var syntaxTrees = files
-            .Select(f => CSharpSyntaxTree.ParseText(File.ReadAllText(f), path: f))
-            .ToList();
+        var compilation = AnalyzerEngine.BuildCompilation(files);
+        var results     = AnalyzerEngine.Analyze(compilation);
+        var output      = AnalyzerEngine.BuildOutput(
+                              results,
+                              parsed.TraceForwardId,
+                              parsed.TraceBackwardId,
+                              parsed.TraceDepth);
 
-        var references = new List<MetadataReference>
+        var json = JsonSerializer.Serialize(output, JsonOptions(parsed.PrettyPrint));
+
+        if (parsed.OutputPath != null)
         {
-            MetadataReference.CreateFromFile(typeof(object).Assembly.Location),
-            MetadataReference.CreateFromFile(typeof(Console).Assembly.Location),
-            MetadataReference.CreateFromFile(typeof(List<>).Assembly.Location),
-            MetadataReference.CreateFromFile(typeof(System.Linq.Enumerable).Assembly.Location),
-            MetadataReference.CreateFromFile(typeof(System.Threading.Tasks.Task).Assembly.Location),
-        };
-        var runtimeDir = System.Runtime.InteropServices.RuntimeEnvironment.GetRuntimeDirectory();
-        foreach (var dll in new[] { "System.Runtime.dll","System.Collections.dll","System.Linq.dll","netstandard.dll" })
-        {
-            var p = Path.Combine(runtimeDir, dll);
-            if (File.Exists(p)) references.Add(MetadataReference.CreateFromFile(p));
+            File.WriteAllText(parsed.OutputPath, json);
+            Console.Error.WriteLine($"Output: {parsed.OutputPath}");
         }
-
-        var compilation = CSharpCompilation.Create("DataFlowAnalysis", syntaxTrees, references,
-            new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary,
-                nullableContextOptions: NullableContextOptions.Annotations));
-
-        var results = new List<AnalysisResult>();
-
-        foreach (var tree in syntaxTrees)
+        else
         {
-            var model = compilation.GetSemanticModel(tree);
-
-            // Pass 1: data flow graph
-            var flowGraph = new DataFlowWalker(model, tree.FilePath).Walk();
-            FlowEnricher.Enrich(flowGraph, compilation);
-
-            // Pass 2: mutation graph
-            var mutationGraph = new MutationWalker(model, flowGraph).Walk();
-
-            int totalEdges = flowGraph.FlowEdges.Count
-                + flowGraph.Units.Sum(u => u.Methods.Concat(u.Constructors).Sum(m => m.FlowEdges.Count));
-
-            Console.Error.WriteLine(
-                $"  {Path.GetFileName(tree.FilePath)}: " +
-                $"{flowGraph.Units.Count} type(s), " +
-                $"{flowGraph.Units.Sum(u => u.Methods.Count + u.Constructors.Count)} method(s), " +
-                $"{totalEdges} flow edges, " +
-                $"{mutationGraph.Mutations.Count} mutation(s), " +
-                $"{mutationGraph.Symbols.Count(s => s.AliasIds.Count > 0)} aliased symbol(s)");
-
-            results.Add(new AnalysisResult
-            {
-                Source = tree.FilePath,
-                FlowGraph = flowGraph,
-                MutationGraph = mutationGraph
-            });
+            Console.WriteLine(json);
         }
-
-        object output = results.Count == 1 ? results[0] : (object)results;
-
-        var jsonOpts = new JsonSerializerOptions
-        {
-            WriteIndented = prettyPrint,
-            DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
-            Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping
-        };
-
-        string json = JsonSerializer.Serialize(output, jsonOpts);
-
-        if (outputPath != null) { File.WriteAllText(outputPath, json); Console.Error.WriteLine($"Output: {outputPath}"); }
-        else Console.WriteLine(json);
 
         return 0;
     }
+
+    static JsonSerializerOptions JsonOptions(bool pretty) => new()
+    {
+        WriteIndented          = pretty,
+        DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
+        // UnsafeRelaxedJsonEscaping: output is JSON-to-file/stdout, not HTML-embedded.
+        Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping
+    };
 
     static void PrintUsage() => Console.Error.WriteLine(@"
 CSharpDataFlowAnalyzer — data flow + mutation analysis for C#
@@ -122,13 +58,17 @@ Usage:
   DataFlowAnalyzer <directory/>  [options]
 
 Options:
-  -o, --output <path>    Write JSON to file (default: stdout)
-  --compact              Minified JSON
-  -h, --help             Help
+  -o, --output <path>        Write JSON to file (default: stdout)
+  --compact                  Minified JSON
+  --trace-forward  <id>      Traverse forward from a symbol ID (what does it affect?)
+  --trace-backward <id>      Traverse backward from a symbol ID (what feeds into it?)
+  --trace-depth    <n>       Max traversal depth, default 20
+  -h, --help                 Help
 
 Output sections:
   flowGraph        — classes, methods, locals, calls, flow edges (method + inter-method + inter-class)
-  mutationGraph    — symbols, mutations (with guards + loop context), aliases, stateChangeSummaries");
+  mutationGraph    — symbols, mutations (with guards + loop context), aliases, stateChangeSummaries
+  traversal        — reachability tree (only present when --trace-forward/backward is used)");
 }
 
 public class AnalysisResult
@@ -141,4 +81,20 @@ public class AnalysisResult
 
     [JsonPropertyName("mutationGraph")]
     public MutationGraph MutationGraph { get; set; } = new();
+
+    [JsonPropertyName("traversal")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public TraversalResult? Traversal { get; set; }
+}
+
+// Used for multi-file output when a traversal is requested.
+// Without --trace-*, multi-file output remains a plain JSON array.
+public class MultiFileOutput
+{
+    [JsonPropertyName("results")]
+    public List<AnalysisResult> Results { get; set; } = new();
+
+    [JsonPropertyName("traversal")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public TraversalResult? Traversal { get; set; }
 }
