@@ -16,6 +16,6 @@
   </ItemGroup>
 
   <ItemGroup>
-    <ProjectReference Include="..\CSharpDataFlowAnalyzer.csproj" />
+    <ProjectReference Include="..\CSharpDataFlowAnalyzer.Core\CSharpDataFlowAnalyzer.Core.csproj" />
   </ItemGroup>
 </Project>

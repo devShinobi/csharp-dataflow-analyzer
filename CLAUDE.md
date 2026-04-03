@@ -5,51 +5,68 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Build & Run
 
 ```bash
-# Build
+# Build entire solution
 dotnet build
 
 # Run analysis on a single file
-dotnet run <file.cs> [options]
+dotnet run --project CSharpDataFlowAnalyzer.Cli/ -- <file.cs> [options]
 
-# Run analysis on a directory
-dotnet run <directory> [options]
+# Run tests
+dotnet test CSharpDataFlowAnalyzer.Tests/
 
 # Options
-#   -o / --output <path>   Write JSON output to a file instead of stdout
-#   --compact              Minified JSON output
+#   -o / --output <path>         Write JSON output to a file instead of stdout
+#   --compact                    Minified JSON output
+#   --trace-forward  <symbolId>  Forward traversal (what does X affect?)
+#   --trace-backward <symbolId>  Backward traversal (what feeds into X?)
+#   --trace-depth    <n>         Max traversal depth (default 20)
 
 # Example
-dotnet run TestSamples/OrderService.cs -o analysis.json --compact
+dotnet run --project CSharpDataFlowAnalyzer.Cli/ -- TestSamples/OrderService.cs -o analysis.json --compact
 ```
 
-**Note**: `<Restore>false</Restore>` is set in the project — dependencies come from the local .NET SDK Roslyn assemblies (`C:\Program Files\dotnet\sdk\10.0.201\Roslyn\bincore\`), not NuGet. Do not attempt `dotnet restore`.
+**Note**: `CSharpDataFlowAnalyzer.Core` and `CSharpDataFlowAnalyzer.Cli` have `<Restore>false</Restore>` — their only dependency is Roslyn, referenced via HintPath from `C:\Program Files\dotnet\sdk\10.0.201\Roslyn\bincore\`. Do not run `dotnet restore` on those projects. The test project restores normally from nuget.org.
+
+## Project Structure
+
+```
+CSharpDataFlowAnalyzer.sln
+├── CSharpDataFlowAnalyzer.Core/     # Class library — analysis pipeline + models
+│   ├── Analysis/
+│   │   ├── DataFlowWalker.cs        # AST walker → FlowGraph
+│   │   ├── FlowEnricher.cs          # Post-processing enrichment pass
+│   │   └── MutationWalker.cs        # Mutation detection → MutationGraph
+│   ├── AnalyzerEngine.cs            # Public API: CollectFiles, AnalyzeFiles, BuildOutput
+│   ├── GraphTraversal.cs            # GraphTraversalEngine (forward/backward DFS)
+│   ├── IdGen.cs                     # Stable human-readable node ID generation
+│   ├── Models.cs                    # FlowGraph model (ClassUnit, MethodNode, FlowEdge …)
+│   ├── MutationModels.cs            # MutationGraph model (SymbolInfo, MutationNode …)
+│   ├── OutputModels.cs              # AnalysisResult, MultiFileOutput
+│   └── TraversalModels.cs           # TraversalResult, TraversalNode, TraversalDirection
+├── CSharpDataFlowAnalyzer.Cli/      # Console app — thin CLI orchestrator
+│   ├── ParsedArgs.cs                # Typed CLI argument record + Parse()
+│   └── Program.cs                   # Main: parse → collect → analyze → serialize
+├── CSharpDataFlowAnalyzer.Tests/    # xUnit tests (27 tests)
+│   └── GraphTraversalEngineTests.cs
+└── TestSamples/
+    └── OrderService.cs              # Sample for manual smoke testing
+```
+
+The **CLI has no Roslyn dependency** — `AnalyzerEngine.AnalyzeFiles` is the boundary; Roslyn types stay inside Core.
 
 ## Architecture
-
-This is a **two-pass static analysis tool** that produces JSON data flow and mutation graphs from C# source code using the Roslyn compiler API.
 
 ### Analysis Pipeline
 
 ```
 C# Source Files
-  → Roslyn SyntaxTree + SemanticModel
+  → Roslyn SyntaxTree + SemanticModel  (AnalyzerEngine.BuildCompilation — internal)
   → Pass 1: DataFlowWalker     → FlowGraph
   → FlowEnricher               → Enhanced FlowGraph
   → Pass 2: MutationWalker     → MutationGraph
+  → GraphTraversalEngine       → TraversalResult  (optional, when --trace-* is used)
   → JSON Output
 ```
-
-### Core Components
-
-| File | Role |
-|------|------|
-| [Program.cs](Program.cs) | CLI entry point; orchestrates both passes; emits JSON |
-| [DataFlowWalker.cs](DataFlowWalker.cs) | AST walker; builds FlowGraph (classes, methods, assignments, calls, edges) |
-| [FlowEnricher.cs](FlowEnricher.cs) | Post-processing: LINQ chain grouping, conditional init tagging, object initializer decomposition |
-| [MutationWalker.cs](MutationWalker.cs) | Detects mutations with guard conditions and alias tracking |
-| [Models.cs](Models.cs) | FlowGraph data model (ClassUnit, MethodNode, CallNode, FlowEdge) |
-| [MutationModels.cs](MutationModels.cs) | MutationGraph model (SymbolInfo, MutationNode, ConditionGuard, StateChangeSummary) |
-| [IdGen.cs](IdGen.cs) | Stable human-readable node ID generation |
 
 ### ID Scheme (IdGen.cs)
 
@@ -70,7 +87,7 @@ Return:      "MethodId/return[idx]"
 
 ### FlowGraph (Models.cs)
 
-Tracks three levels of data flow:
+Three levels of data flow:
 - **Intra-method**: local variables, parameters, assignments, calls, returns
 - **Inter-method**: call graph edges, argument→parameter mappings, return→result
 - **Inter-class**: field reads/writes, property access, constructor DI patterns
@@ -79,44 +96,22 @@ FlowEdge kinds: `assignment`, `argument`, `return`, `field-write`, `field-read`,
 
 ### MutationGraph (MutationModels.cs)
 
-Tracks which symbols are mutated, under what conditions, and whether they are aliased:
-- **SymbolInfo**: classifies every named symbol by type kind (`value`/`reference`/`interface`/`unknown`) and sharing scope (`local`/`shared`)
-- **MutationNode**: a single write operation with target, source, and a `ConditionGuard`
-- **ConditionGuard**: captures the enclosing control flow (`if`, `switch-case`, `try-catch`, `foreach`, `for`, `while`, `null-check`) and branch direction
-- **StateChangeSummary**: per-symbol rollup of all mutations, reading/writing methods, loop mutations, and aliased external calls
+- **SymbolInfo**: every named symbol — type kind (`value`/`reference`/`interface`/`unknown`), sharing scope (`local`/`shared`), alias IDs
+- **MutationNode**: single write with target, source, `ConditionGuard`, loop flag
+- **ConditionGuard**: enclosing control flow (`if`, `switch-case`, `try-catch`, `foreach`, `for`, `while`, `null-check`) + branch direction
+- **StateChangeSummary**: per-symbol rollup
 
-Only reference-type symbols are treated as true mutations. Value-type assignments are tracked in the FlowGraph but not the MutationGraph.
-
-### Type Classification Heuristics (MutationWalker.cs)
-
-When Roslyn semantic info is unavailable, types are classified by:
-- Known primitives and value types (`int`, `bool`, `DateTime`, `Guid`, etc.)
-- Known collections (`List<T>`, `Dictionary<K,V>`, arrays)
-- Interface detection: name starts with `I` + uppercase letter
-- Service heuristics: suffix is `Service`, `Repository`, `Manager`, `Handler`, `Client`, etc.
-- `Task<T>` treated as reference type
+Only reference-type symbols are treated as mutations. Value-type assignments appear in FlowGraph only.
 
 ### Output Schema
 
-Single file → one JSON object. Multiple files → JSON array.
+Single file → `AnalysisResult`. Multiple files → `AnalysisResult[]`. With `--trace-*` and multiple files → `MultiFileOutput`.
 
 ```json
 {
   "source": "path/to/file.cs",
-  "flowGraph": {
-    "source": "...",
-    "analysisDepth": "method+inter-method+inter-class",
-    "units": [],
-    "flowEdges": []
-  },
-  "mutationGraph": {
-    "symbols": [],
-    "mutations": [],
-    "stateChangeSummaries": []
-  }
+  "flowGraph": { "units": [], "flowEdges": [] },
+  "mutationGraph": { "symbols": [], "mutations": [], "stateChangeSummaries": [] },
+  "traversal": { "originSymbolId": "...", "direction": "forward", "root": {} }
 }
 ```
-
-## Test Sample
-
-[TestSamples/OrderService.cs](TestSamples/OrderService.cs) is the primary sample for manual testing — an e-commerce `OrderService` exercising async methods, LINQ chains, object initializers, DI constructor injection, null guards, and foreach loops.

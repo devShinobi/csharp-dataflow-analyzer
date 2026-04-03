@@ -34,10 +34,21 @@ public static class AnalyzerEngine
         return files;
     }
 
-    // ── Roslyn compilation ────────────────────────────────────────────────────
+    // ── Analysis entry point ──────────────────────────────────────────────────
 
-    /// <summary>Parses <paramref name="filePaths"/> and creates a Roslyn compilation.</summary>
-    public static CSharpCompilation BuildCompilation(IEnumerable<string> filePaths)
+    /// <summary>
+    /// Full pipeline: parses <paramref name="filePaths"/>, compiles, and runs both
+    /// analysis passes.  Callers outside this assembly do not need a Roslyn reference.
+    /// </summary>
+    public static List<AnalysisResult> AnalyzeFiles(IEnumerable<string> filePaths)
+    {
+        var compilation = BuildCompilation(filePaths);
+        return Analyze(compilation);
+    }
+
+    // ── Roslyn compilation (internal — Roslyn types stay inside Core) ─────────
+
+    internal static CSharpCompilation BuildCompilation(IEnumerable<string> filePaths)
     {
         var trees = filePaths
             .Select(f => CSharpSyntaxTree.ParseText(File.ReadAllText(f), path: f))
@@ -77,11 +88,7 @@ public static class AnalyzerEngine
 
     // ── Analysis passes ───────────────────────────────────────────────────────
 
-    /// <summary>
-    /// Runs both analysis passes (data flow + mutation) over every syntax tree
-    /// in <paramref name="compilation"/> and returns one result per file.
-    /// </summary>
-    public static List<AnalysisResult> Analyze(CSharpCompilation compilation)
+    internal static List<AnalysisResult> Analyze(CSharpCompilation compilation)
     {
         var results = new List<AnalysisResult>();
 

@@ -2,7 +2,6 @@ using System;
 using System.IO;
 using System.Text.Json;
 using System.Text.Json.Serialization;
-using System.Collections.Generic;
 
 namespace CSharpDataFlowAnalyzer;
 
@@ -19,13 +18,12 @@ class Program
 
         Console.Error.WriteLine($"Analyzing {files.Count} file(s)...");
 
-        var compilation = AnalyzerEngine.BuildCompilation(files);
-        var results     = AnalyzerEngine.Analyze(compilation);
-        var output      = AnalyzerEngine.BuildOutput(
-                              results,
-                              parsed.TraceForwardId,
-                              parsed.TraceBackwardId,
-                              parsed.TraceDepth);
+        var results = AnalyzerEngine.AnalyzeFiles(files);
+        var output  = AnalyzerEngine.BuildOutput(
+                          results,
+                          parsed.TraceForwardId,
+                          parsed.TraceBackwardId,
+                          parsed.TraceDepth);
 
         var json = JsonSerializer.Serialize(output, JsonOptions(parsed.PrettyPrint));
 
@@ -69,32 +67,4 @@ Output sections:
   flowGraph        — classes, methods, locals, calls, flow edges (method + inter-method + inter-class)
   mutationGraph    — symbols, mutations (with guards + loop context), aliases, stateChangeSummaries
   traversal        — reachability tree (only present when --trace-forward/backward is used)");
-}
-
-public class AnalysisResult
-{
-    [JsonPropertyName("source")]
-    public string Source { get; set; } = "";
-
-    [JsonPropertyName("flowGraph")]
-    public FlowGraph FlowGraph { get; set; } = new();
-
-    [JsonPropertyName("mutationGraph")]
-    public MutationGraph MutationGraph { get; set; } = new();
-
-    [JsonPropertyName("traversal")]
-    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    public TraversalResult? Traversal { get; set; }
-}
-
-// Used for multi-file output when a traversal is requested.
-// Without --trace-*, multi-file output remains a plain JSON array.
-public class MultiFileOutput
-{
-    [JsonPropertyName("results")]
-    public List<AnalysisResult> Results { get; set; } = new();
-
-    [JsonPropertyName("traversal")]
-    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    public TraversalResult? Traversal { get; set; }
 }

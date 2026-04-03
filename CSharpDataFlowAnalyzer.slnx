@@ -1,0 +1,5 @@
+<Solution>
+  <Project Path="CSharpDataFlowAnalyzer.Cli/CSharpDataFlowAnalyzer.Cli.csproj" />
+  <Project Path="CSharpDataFlowAnalyzer.Core/CSharpDataFlowAnalyzer.Core.csproj" />
+  <Project Path="CSharpDataFlowAnalyzer.Tests/CSharpDataFlowAnalyzer.Tests.csproj" />
+</Solution>
