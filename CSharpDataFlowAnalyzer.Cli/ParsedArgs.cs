@@ -1,10 +1,11 @@
+using System;
 using System.Collections.Generic;
 
 namespace CSharpDataFlowAnalyzer;
 
 /// <summary>Typed representation of the CLI arguments passed to the analyzer.</summary>
 public sealed record ParsedArgs(
-    List<string>  InputPaths,
+    IReadOnlyList<string> InputPaths,
     string?       OutputPath,
     string?       TraceForwardId,
     string?       TraceBackwardId,
@@ -45,7 +46,7 @@ public sealed record ParsedArgs(
             }
 
         if (traceForwardId != null && traceBackwardId != null)
-            System.Console.Error.WriteLine(
+            Console.Error.WriteLine(
                 "Warning: --trace-forward and --trace-backward both supplied; using forward.");
 
         return new ParsedArgs(inputPaths, outputPath, traceForwardId, traceBackwardId, traceDepth, prettyPrint);

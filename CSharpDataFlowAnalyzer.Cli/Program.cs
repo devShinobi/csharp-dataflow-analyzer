@@ -29,8 +29,16 @@ class Program
 
         if (parsed.OutputPath != null)
         {
-            File.WriteAllText(parsed.OutputPath, json);
-            Console.Error.WriteLine($"Output: {parsed.OutputPath}");
+            try
+            {
+                File.WriteAllText(parsed.OutputPath, json);
+                Console.Error.WriteLine($"Output: {parsed.OutputPath}");
+            }
+            catch (IOException ex)
+            {
+                Console.Error.WriteLine($"Error: could not write '{parsed.OutputPath}': {ex.Message}");
+                return 1;
+            }
         }
         else
         {

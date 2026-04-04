@@ -270,7 +270,7 @@ public class GraphTraversalEngine
         if (id.Contains("::prop:"))                    return "property";
         if (id.Contains("::ctor["))                    return "constructor";
         if (id.Contains("::") && id.Contains("["))     return "method";
-        if (id.Contains(".") || !id.Contains("::"))    return "class";
+        if (id.Contains("."))                            return "class";
         return "unknown";
     }
 }

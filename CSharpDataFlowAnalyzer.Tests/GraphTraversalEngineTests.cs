@@ -351,3 +351,158 @@ public class MultiFileTests
         Assert.Equal("C", c.SymbolId);
     }
 }
+
+public class ParsedArgsTests
+{
+    [Fact]
+    public void Parse_InputPaths_CollectedFromPositionalArgs()
+    {
+        var args = ParsedArgs.Parse(["file1.cs", "file2.cs"]);
+
+        Assert.Equal(2, args.InputPaths.Count);
+        Assert.Equal("file1.cs", args.InputPaths[0]);
+        Assert.Equal("file2.cs", args.InputPaths[1]);
+    }
+
+    [Fact]
+    public void Parse_OutputFlag_SetsOutputPath()
+    {
+        var args = ParsedArgs.Parse(["-o", "out.json", "file.cs"]);
+        Assert.Equal("out.json", args.OutputPath);
+    }
+
+    [Fact]
+    public void Parse_OutputFlagLong_SetsOutputPath()
+    {
+        var args = ParsedArgs.Parse(["--output", "out.json", "file.cs"]);
+        Assert.Equal("out.json", args.OutputPath);
+    }
+
+    [Fact]
+    public void Parse_TraceForward_SetsId()
+    {
+        var args = ParsedArgs.Parse(["--trace-forward", "SomeClass::Method[0]", "file.cs"]);
+        Assert.Equal("SomeClass::Method[0]", args.TraceForwardId);
+        Assert.Null(args.TraceBackwardId);
+    }
+
+    [Fact]
+    public void Parse_TraceBackward_SetsId()
+    {
+        var args = ParsedArgs.Parse(["--trace-backward", "SomeClass::Method[0]", "file.cs"]);
+        Assert.Equal("SomeClass::Method[0]", args.TraceBackwardId);
+        Assert.Null(args.TraceForwardId);
+    }
+
+    [Fact]
+    public void Parse_TraceDepth_Parsed()
+    {
+        var args = ParsedArgs.Parse(["--trace-depth", "5", "file.cs"]);
+        Assert.Equal(5, args.TraceDepth);
+    }
+
+    [Fact]
+    public void Parse_TraceDepthBelowOne_ClampedToOne()
+    {
+        var args = ParsedArgs.Parse(["--trace-depth", "0", "file.cs"]);
+        Assert.Equal(1, args.TraceDepth);
+    }
+
+    [Fact]
+    public void Parse_CompactFlag_DisablesPrettyPrint()
+    {
+        var args = ParsedArgs.Parse(["--compact", "file.cs"]);
+        Assert.False(args.PrettyPrint);
+    }
+
+    [Fact]
+    public void Parse_Defaults_AreCorrect()
+    {
+        var args = ParsedArgs.Parse(["file.cs"]);
+
+        Assert.Null(args.OutputPath);
+        Assert.Null(args.TraceForwardId);
+        Assert.Null(args.TraceBackwardId);
+        Assert.Equal(20, args.TraceDepth);
+        Assert.True(args.PrettyPrint);
+    }
+}
+
+public class AnalyzerEngineBuildOutputTests
+{
+    private static AnalysisResult MakeResult(string source = "test.cs") => new()
+    {
+        Source        = source,
+        FlowGraph     = new FlowGraph(),
+        MutationGraph = new MutationGraph()
+    };
+
+    [Fact]
+    public void BuildOutput_NoTrace_SingleFile_ReturnsAnalysisResult()
+    {
+        var results = new List<AnalysisResult> { MakeResult() };
+
+        var output = AnalyzerEngine.BuildOutput(results, null, null, 20);
+
+        Assert.IsType<AnalysisResult>(output);
+    }
+
+    [Fact]
+    public void BuildOutput_NoTrace_MultiFile_ReturnsList()
+    {
+        var results = new List<AnalysisResult> { MakeResult("a.cs"), MakeResult("b.cs") };
+
+        var output = AnalyzerEngine.BuildOutput(results, null, null, 20);
+
+        Assert.IsType<List<AnalysisResult>>(output);
+    }
+
+    [Fact]
+    public void BuildOutput_TraceForward_SingleFile_ReturnsAnalysisResultWithTraversal()
+    {
+        var result = MakeResult();
+        result.FlowGraph.FlowEdges.Add(new FlowEdge { From = "A", To = "B", Kind = "assignment" });
+        var results = new List<AnalysisResult> { result };
+
+        var output = AnalyzerEngine.BuildOutput(results, "A", null, 20);
+
+        var ar = Assert.IsType<AnalysisResult>(output);
+        Assert.NotNull(ar.Traversal);
+        Assert.Equal("forward", ar.Traversal!.Direction);
+    }
+
+    [Fact]
+    public void BuildOutput_TraceForward_DoesNotMutateOriginalResult()
+    {
+        var result = MakeResult();
+        var results = new List<AnalysisResult> { result };
+
+        AnalyzerEngine.BuildOutput(results, "A", null, 20);
+
+        // The original entry must not have been modified
+        Assert.Null(result.Traversal);
+    }
+
+    [Fact]
+    public void BuildOutput_TraceForward_MultiFile_ReturnsMultiFileOutput()
+    {
+        var results = new List<AnalysisResult> { MakeResult("a.cs"), MakeResult("b.cs") };
+
+        var output = AnalyzerEngine.BuildOutput(results, "A", null, 20);
+
+        Assert.IsType<MultiFileOutput>(output);
+    }
+
+    [Fact]
+    public void BuildOutput_TraceBackward_UsesBackwardDirection()
+    {
+        var result = MakeResult();
+        result.FlowGraph.FlowEdges.Add(new FlowEdge { From = "A", To = "B", Kind = "assignment" });
+        var results = new List<AnalysisResult> { result };
+
+        var output = AnalyzerEngine.BuildOutput(results, null, "B", 20);
+
+        var ar = Assert.IsType<AnalysisResult>(output);
+        Assert.Equal("backward", ar.Traversal!.Direction);
+    }
+}

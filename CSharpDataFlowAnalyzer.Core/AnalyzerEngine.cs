@@ -19,8 +19,10 @@ public static class AnalyzerEngine
     /// Expands a mix of file paths and directory paths into a flat list of
     /// <c>.cs</c> source files.  Unknown paths are skipped with a warning.
     /// </summary>
-    public static List<string> CollectFiles(IEnumerable<string> inputPaths)
+    /// <param name="log">Receives diagnostic messages. Defaults to <c>Console.Error.WriteLine</c>.</param>
+    public static List<string> CollectFiles(IEnumerable<string> inputPaths, Action<string>? log = null)
     {
+        log ??= Console.Error.WriteLine;
         var files = new List<string>();
         foreach (var path in inputPaths)
         {
@@ -29,7 +31,7 @@ public static class AnalyzerEngine
             else if (File.Exists(path))
                 files.Add(path);
             else
-                Console.Error.WriteLine($"Warning: '{path}' not found — skipping.");
+                log($"Warning: '{path}' not found — skipping.");
         }
         return files;
     }
@@ -40,10 +42,11 @@ public static class AnalyzerEngine
     /// Full pipeline: parses <paramref name="filePaths"/>, compiles, and runs both
     /// analysis passes.  Callers outside this assembly do not need a Roslyn reference.
     /// </summary>
-    public static List<AnalysisResult> AnalyzeFiles(IEnumerable<string> filePaths)
+    /// <param name="log">Receives diagnostic messages. Defaults to <c>Console.Error.WriteLine</c>.</param>
+    public static List<AnalysisResult> AnalyzeFiles(IEnumerable<string> filePaths, Action<string>? log = null)
     {
         var compilation = BuildCompilation(filePaths);
-        return Analyze(compilation);
+        return Analyze(compilation, log);
     }
 
     // ── Roslyn compilation (internal — Roslyn types stay inside Core) ─────────
@@ -88,8 +91,9 @@ public static class AnalyzerEngine
 
     // ── Analysis passes ───────────────────────────────────────────────────────
 
-    internal static List<AnalysisResult> Analyze(CSharpCompilation compilation)
+    internal static List<AnalysisResult> Analyze(CSharpCompilation compilation, Action<string>? log = null)
     {
+        log ??= Console.Error.WriteLine;
         var results = new List<AnalysisResult>();
 
         foreach (var tree in compilation.SyntaxTrees)
@@ -101,7 +105,7 @@ public static class AnalyzerEngine
 
             var mutationGraph = new MutationWalker(model, flowGraph).Walk();
 
-            LogFileSummary(tree.FilePath, flowGraph, mutationGraph);
+            LogFileSummary(tree.FilePath, flowGraph, mutationGraph, log);
 
             results.Add(new AnalysisResult
             {
@@ -114,13 +118,12 @@ public static class AnalyzerEngine
         return results;
     }
 
-    private static void LogFileSummary(string filePath, FlowGraph fg, MutationGraph mg)
+    private static void LogFileSummary(string filePath, FlowGraph fg, MutationGraph mg, Action<string> log)
     {
         int totalEdges = fg.FlowEdges.Count
             + fg.Units.Sum(u => u.Methods.Concat(u.Constructors).Sum(m => m.FlowEdges.Count));
 
-        Console.Error.WriteLine(
-            $"  {Path.GetFileName(filePath)}: " +
+        log($"  {Path.GetFileName(filePath)}: " +
             $"{fg.Units.Count} type(s), " +
             $"{fg.Units.Sum(u => u.Methods.Count + u.Constructors.Count)} method(s), " +
             $"{totalEdges} flow edges, " +
@@ -131,20 +134,22 @@ public static class AnalyzerEngine
     // ── Output assembly ───────────────────────────────────────────────────────
 
     /// <summary>
-    /// Optionally runs traversal and returns the appropriate output object:
-    /// <list type="bullet">
-    ///   <item>Single file, no trace → <see cref="AnalysisResult"/></item>
-    ///   <item>Multi file, no trace  → <c>List&lt;AnalysisResult&gt;</c></item>
-    ///   <item>Single file, trace    → <see cref="AnalysisResult"/> with <c>Traversal</c> set</item>
-    ///   <item>Multi file, trace     → <see cref="MultiFileOutput"/></item>
-    /// </list>
+    /// Optionally runs traversal and returns the appropriate output object.
+    /// Returns <c>object</c> because the shape varies by file count and trace mode:
+    /// single-file → <see cref="AnalysisResult"/>, multi-file → <c>List&lt;AnalysisResult&gt;</c>,
+    /// multi-file+trace → <see cref="MultiFileOutput"/>.
+    /// <c>System.Text.Json</c> serializes the runtime type correctly in all cases.
     /// </summary>
+    /// <param name="log">Receives diagnostic messages. Defaults to <c>Console.Error.WriteLine</c>.</param>
     public static object BuildOutput(
         List<AnalysisResult> results,
         string?              traceForwardId,
         string?              traceBackwardId,
-        int                  traceDepth)
+        int                  traceDepth,
+        Action<string>?      log = null)
     {
+        log ??= Console.Error.WriteLine;
+
         if (traceForwardId == null && traceBackwardId == null)
             return results.Count == 1 ? (object)results[0] : results;
 
@@ -153,18 +158,23 @@ public static class AnalyzerEngine
         var engine    = GraphTraversalEngine.FromMultiple(results);
 
         if (!engine.SymbolExists(traceId))
-            Console.Error.WriteLine($"Warning: symbol '{traceId}' not found in analyzed file(s).");
+            log($"Warning: symbol '{traceId}' not found in analyzed file(s).");
 
         var traversal = engine.Traverse(traceId, direction, traceDepth);
-        Console.Error.WriteLine(
-            $"  Traversal ({direction}): {traversal.NodesVisited} node(s), " +
+        log($"  Traversal ({direction}): {traversal.NodesVisited} node(s), " +
             $"{traversal.MutationsFound} mutation(s), " +
             $"{traversal.CyclesDetected?.Count ?? 0} cycle(s)");
 
         if (results.Count == 1)
         {
-            results[0].Traversal = traversal;
-            return results[0];
+            // Return a new instance — do not mutate the original result.
+            return new AnalysisResult
+            {
+                Source        = results[0].Source,
+                FlowGraph     = results[0].FlowGraph,
+                MutationGraph = results[0].MutationGraph,
+                Traversal     = traversal
+            };
         }
 
         return new MultiFileOutput { Results = results, Traversal = traversal };
