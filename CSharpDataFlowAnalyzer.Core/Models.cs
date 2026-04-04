@@ -232,6 +232,10 @@ public class AssignmentNode
 
     [JsonPropertyName("sourceIds")]
     public List<string> SourceIds { get; set; } = new();
+
+    [JsonPropertyName("sequenceOrder")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public int SequenceOrder { get; set; }
 }
 
 // ── Call ──────────────────────────────────────────────────────────────────────
@@ -270,6 +274,10 @@ public class CallNode
 
     [JsonPropertyName("resolvedMethodId")]
     public string? ResolvedMethodId { get; set; }
+
+    [JsonPropertyName("sequenceOrder")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public int SequenceOrder { get; set; }
 }
 
 // ── Argument ──────────────────────────────────────────────────────────────────
@@ -308,6 +316,10 @@ public class ReturnNode
     [JsonPropertyName("isInterpolated")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
     public bool IsInterpolated { get; set; }
+
+    [JsonPropertyName("sequenceOrder")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public int SequenceOrder { get; set; }
 }
 
 // ── Flow edges ────────────────────────────────────────────────────────────────

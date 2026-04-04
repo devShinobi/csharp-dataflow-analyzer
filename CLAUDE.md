@@ -33,9 +33,11 @@ dotnet run --project CSharpDataFlowAnalyzer.Cli/ -- TestSamples/OrderService.cs 
 CSharpDataFlowAnalyzer.sln
 ├── CSharpDataFlowAnalyzer.Core/     # Class library — analysis pipeline + models
 │   ├── Analysis/
-│   │   ├── DataFlowWalker.cs        # AST walker → FlowGraph
-│   │   ├── FlowEnricher.cs          # Post-processing enrichment pass
-│   │   └── MutationWalker.cs        # Mutation detection → MutationGraph
+│   │   ├── OperationWalker.cs       # Unified IOperation walker → FlowGraph + MutationGraph
+│   │   ├── UnifiedAnalyzer.cs       # Entry point facade for the unified pipeline
+│   │   ├── TypeClassifier.cs        # ITypeSymbol → typeKind/isNullable classification
+│   │   ├── SymbolResolver.cs        # ISymbol → stable IdGen ID mapping
+│   │   └── ControlFlowMapper.cs     # CFG regions → ConditionGuard + loop detection
 │   ├── AnalyzerEngine.cs            # Public API: CollectFiles, AnalyzeFiles, BuildOutput
 │   ├── GraphTraversal.cs            # GraphTraversalEngine (forward/backward DFS)
 │   ├── IdGen.cs                     # Stable human-readable node ID generation
@@ -46,7 +48,7 @@ CSharpDataFlowAnalyzer.sln
 ├── CSharpDataFlowAnalyzer.Cli/      # Console app — thin CLI orchestrator
 │   ├── ParsedArgs.cs                # Typed CLI argument record + Parse()
 │   └── Program.cs                   # Main: parse → collect → analyze → serialize
-├── CSharpDataFlowAnalyzer.Tests/    # xUnit tests (27 tests)
+├── CSharpDataFlowAnalyzer.Tests/    # xUnit tests (42 tests)
 │   └── GraphTraversalEngineTests.cs
 └── TestSamples/
     └── OrderService.cs              # Sample for manual smoke testing
@@ -61,9 +63,11 @@ The **CLI has no Roslyn dependency** — `AnalyzerEngine.AnalyzeFiles` is the bo
 ```
 C# Source Files
   → Roslyn SyntaxTree + SemanticModel  (AnalyzerEngine.BuildCompilation — internal)
-  → Pass 1: DataFlowWalker     → FlowGraph
-  → FlowEnricher               → Enhanced FlowGraph
-  → Pass 2: MutationWalker     → MutationGraph
+  → UnifiedAnalyzer (single pass via IOperation tree + ControlFlowGraph)
+    → OperationWalker           → FlowGraph + MutationGraph (simultaneously)
+      uses: TypeClassifier      — ITypeSymbol-based type classification
+      uses: SymbolResolver      — ISymbol → IdGen stable ID mapping
+      uses: ControlFlowMapper   — CFG regions → ConditionGuard + loop detection
   → GraphTraversalEngine       → TraversalResult  (optional, when --trace-* is used)
   → JSON Output
 ```

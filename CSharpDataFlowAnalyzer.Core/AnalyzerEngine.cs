@@ -100,10 +100,7 @@ public static class AnalyzerEngine
         {
             var model = compilation.GetSemanticModel(tree);
 
-            var flowGraph = new DataFlowWalker(model, tree.FilePath).Walk();
-            FlowEnricher.Enrich(flowGraph, compilation);
-
-            var mutationGraph = new MutationWalker(model, flowGraph).Walk();
+            var (flowGraph, mutationGraph) = UnifiedAnalyzer.Analyze(model, compilation, tree.FilePath);
 
             LogFileSummary(tree.FilePath, flowGraph, mutationGraph, log);
 

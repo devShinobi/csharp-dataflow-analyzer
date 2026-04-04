@@ -43,6 +43,12 @@ public class SymbolInfo
     [JsonPropertyName("declaredInMethod")]
     public string? DeclaredInMethod { get; set; }
 
+    // Nullable flow state from Roslyn's flow analysis.
+    // "notNull" | "maybeNull" — null when not analyzed.
+    [JsonPropertyName("nullableFlowState")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? NullableFlowState { get; set; }
+
     // Other symbol IDs that may point to the same heap object.
     // Built by tracing assignment: if local B = A and A is a reference type,
     // B is an alias of A.
