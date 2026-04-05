@@ -117,6 +117,15 @@ internal sealed class OperationWalker
             }
         };
 
+        // Attributes
+        var classAttrs = typeSymbol.GetAttributes();
+        if (classAttrs.Length > 0)
+            unit.Attributes = classAttrs
+                .Select(a => a.AttributeClass?.ToDisplayString() ?? a.ToString())
+                .Where(a => !string.IsNullOrEmpty(a))
+                .Select(a => a!)
+                .ToList();
+
         // Base types — from the symbol, not syntax BaseList
         if (typeSymbol.BaseType != null && typeSymbol.BaseType.SpecialType != SpecialType.System_Object
             && typeSymbol.BaseType.SpecialType != SpecialType.System_ValueType)
@@ -192,6 +201,15 @@ internal sealed class OperationWalker
 
             string name = isCtor ? ".ctor" : member.Name;
             var node = BuildMethodNode(methodId, name, member.ReturnType.ToDisplayString(), member);
+
+            var methodAttrs = member.GetAttributes();
+            if (methodAttrs.Length > 0)
+                node.Attributes = methodAttrs
+                    .Select(a => a.AttributeClass?.ToDisplayString() ?? a.ToString())
+                    .Where(a => !string.IsNullOrEmpty(a))
+                    .Select(a => a!)
+                    .ToList();
+
             ProcessMethodBody(bodySyntax, node);
 
             if (isCtor)

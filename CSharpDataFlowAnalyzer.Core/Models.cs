@@ -36,6 +36,10 @@ public class ClassUnit
     [JsonPropertyName("kind")]
     public string Kind { get; set; } = "class"; // class | interface | struct | record
 
+    [JsonPropertyName("attributes")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public List<string>? Attributes { get; set; }
+
     [JsonPropertyName("baseTypes")]
     public List<string> BaseTypes { get; set; } = new();
 
@@ -123,6 +127,10 @@ public class MethodNode
 
     [JsonPropertyName("isStatic")]
     public bool IsStatic { get; set; }
+
+    [JsonPropertyName("attributes")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public List<string>? Attributes { get; set; }
 
     [JsonPropertyName("params")]
     public List<ParamNode> Params { get; set; } = new();
