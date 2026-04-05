@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Text.Json;
 using System.Text.Json.Serialization;
@@ -12,13 +13,22 @@ class Program
         if (args.Length == 0 || args[0] is "-h" or "--help") { PrintUsage(); return 0; }
 
         var parsed = ParsedArgs.Parse(args);
-        var files  = AnalyzerEngine.CollectFiles(parsed.InputPaths);
+        var files  = AnalyzerEngine.CollectFiles(parsed.InputPaths, out var solutionPath);
 
-        if (files.Count == 0) { Console.Error.WriteLine("Error: no .cs files found."); return 1; }
+        List<AnalysisResult> results;
+        if (solutionPath != null)
+        {
+            Console.Error.WriteLine($"Loading solution/project: {solutionPath}");
+            results = AnalyzerEngine.AnalyzeSolution(solutionPath);
+        }
+        else
+        {
+            if (files.Count == 0) { Console.Error.WriteLine("Error: no .cs files found."); return 1; }
+            Console.Error.WriteLine($"Analyzing {files.Count} file(s)...");
+            results = AnalyzerEngine.AnalyzeFiles(files);
+        }
 
-        Console.Error.WriteLine($"Analyzing {files.Count} file(s)...");
-
-        var results = AnalyzerEngine.AnalyzeFiles(files);
+        if (results.Count == 0) { Console.Error.WriteLine("Error: no analysis results produced."); return 1; }
         var output  = AnalyzerEngine.BuildOutput(
                           results,
                           parsed.TraceForwardId,

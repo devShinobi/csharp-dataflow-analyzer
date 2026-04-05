@@ -52,3 +52,7 @@ CodeCoverage/
 *.VisualState.xml
 TestResult.xml
 nunit-*.xml
+# Generated analysis output
+analysis-*.json
+trace-*.json
+traversal-*.json

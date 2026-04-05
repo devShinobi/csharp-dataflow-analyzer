@@ -1,7 +1,9 @@
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Threading.Tasks;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 
@@ -16,31 +18,57 @@ public static class AnalyzerEngine
     // ── File discovery ────────────────────────────────────────────────────────
 
     /// <summary>
-    /// Expands a mix of file paths and directory paths into a flat list of
-    /// <c>.cs</c> source files.  Unknown paths are skipped with a warning.
+    /// Expands a mix of file paths, directory paths, and solution/project paths
+    /// into a flat list of <c>.cs</c> source files.  Solution/project files are
+    /// separated out into <paramref name="solutionOrProjectPath"/> when found.
+    /// Unknown paths are skipped with a warning.
     /// </summary>
+    /// <param name="solutionOrProjectPath">
+    /// Set to the first <c>.sln</c>/<c>.slnx</c>/<c>.csproj</c> found in
+    /// <paramref name="inputPaths"/>, or <c>null</c> when only loose files/dirs
+    /// are provided.
+    /// </param>
     /// <param name="log">Receives diagnostic messages. Defaults to <c>Console.Error.WriteLine</c>.</param>
-    public static List<string> CollectFiles(IEnumerable<string> inputPaths, Action<string>? log = null)
+    public static List<string> CollectFiles(
+        IEnumerable<string> inputPaths,
+        out string? solutionOrProjectPath,
+        Action<string>? log = null)
     {
         log ??= Console.Error.WriteLine;
+        solutionOrProjectPath = null;
         var files = new List<string>();
+
         foreach (var path in inputPaths)
         {
-            if (Directory.Exists(path))
+            if (SolutionLoader.CanLoad(path))
+            {
+                if (solutionOrProjectPath == null)
+                    solutionOrProjectPath = path;
+                else
+                    log($"Warning: multiple solution/project inputs — using '{solutionOrProjectPath}', ignoring '{path}'.");
+            }
+            else if (Directory.Exists(path))
                 files.AddRange(Directory.GetFiles(path, "*.cs", SearchOption.AllDirectories));
             else if (File.Exists(path))
                 files.Add(path);
             else
                 log($"Warning: '{path}' not found — skipping.");
         }
+
         return files;
     }
 
-    // ── Analysis entry point ──────────────────────────────────────────────────
+    /// <summary>Overload for backward compatibility — ignores solution/project detection.</summary>
+    public static List<string> CollectFiles(IEnumerable<string> inputPaths, Action<string>? log = null)
+    {
+        return CollectFiles(inputPaths, out _, log);
+    }
+
+    // ── Analysis entry points ─────────────────────────────────────────────────
 
     /// <summary>
-    /// Full pipeline: parses <paramref name="filePaths"/>, compiles, and runs both
-    /// analysis passes.  Callers outside this assembly do not need a Roslyn reference.
+    /// Full pipeline for loose <c>.cs</c> files: parses, compiles with BCL
+    /// references, and runs both analysis passes.
     /// </summary>
     /// <param name="log">Receives diagnostic messages. Defaults to <c>Console.Error.WriteLine</c>.</param>
     public static List<AnalysisResult> AnalyzeFiles(IEnumerable<string> filePaths, Action<string>? log = null)
@@ -49,8 +77,48 @@ public static class AnalyzerEngine
         return Analyze(compilation, log);
     }
 
+    /// <summary>
+    /// Full pipeline for a solution or project file: uses <see cref="SolutionLoader"/>
+    /// to resolve projects, NuGet packages, and framework references, then builds
+    /// per-project Roslyn compilations and analyzes each.
+    /// </summary>
+    /// <param name="log">Receives diagnostic messages. Defaults to <c>Console.Error.WriteLine</c>.</param>
+    public static List<AnalysisResult> AnalyzeSolution(string solutionOrProjectPath, Action<string>? log = null)
+    {
+        log ??= Console.Error.WriteLine;
+
+        var projects = SolutionLoader.Load(solutionOrProjectPath, log);
+
+        if (projects.Count == 0)
+        {
+            log("Warning: no projects loaded — falling back to empty result.");
+            return new List<AnalysisResult>();
+        }
+
+        var allResults = new List<AnalysisResult>();
+
+        foreach (var project in projects)
+        {
+            if (project.SourceFiles.Count == 0)
+            {
+                log($"  {Path.GetFileName(project.ProjectPath)}: no source files — skipping.");
+                continue;
+            }
+
+            log($"Compiling {Path.GetFileName(project.ProjectPath)} " +
+                $"({project.SourceFiles.Count} file(s), {project.ReferencePaths.Count} ref(s))...");
+
+            var compilation = BuildCompilation(project);
+            var results = Analyze(compilation, log);
+            allResults.AddRange(results);
+        }
+
+        return allResults;
+    }
+
     // ── Roslyn compilation (internal — Roslyn types stay inside Core) ─────────
 
+    /// <summary>Loose-file compilation with BCL-only references.</summary>
     internal static CSharpCompilation BuildCompilation(IEnumerable<string> filePaths)
     {
         var trees = filePaths
@@ -65,6 +133,32 @@ public static class AnalyzerEngine
             references,
             new CSharpCompilationOptions(
                 OutputKind.DynamicallyLinkedLibrary,
+                nullableContextOptions: NullableContextOptions.Annotations));
+    }
+
+    /// <summary>
+    /// Project-aware compilation using resolved references from <see cref="SolutionLoader"/>.
+    /// </summary>
+    internal static CSharpCompilation BuildCompilation(ProjectInfo project)
+    {
+        var trees = project.SourceFiles
+            .Select(f => CSharpSyntaxTree.ParseText(File.ReadAllText(f), path: f))
+            .ToList();
+
+        var references = project.ReferencePaths
+            .Select(p => (MetadataReference)MetadataReference.CreateFromFile(p))
+            .ToList();
+
+        var outputKind = project.OutputType.Equals("Exe", StringComparison.OrdinalIgnoreCase)
+            ? OutputKind.ConsoleApplication
+            : OutputKind.DynamicallyLinkedLibrary;
+
+        return CSharpCompilation.Create(
+            project.AssemblyName,
+            trees,
+            references,
+            new CSharpCompilationOptions(
+                outputKind,
                 nullableContextOptions: NullableContextOptions.Annotations));
     }
 
@@ -94,25 +188,50 @@ public static class AnalyzerEngine
     internal static List<AnalysisResult> Analyze(CSharpCompilation compilation, Action<string>? log = null)
     {
         log ??= Console.Error.WriteLine;
-        var results = new List<AnalysisResult>();
+        var trees = compilation.SyntaxTrees.ToList();
 
-        foreach (var tree in compilation.SyntaxTrees)
+        // Single file — no parallelism overhead needed.
+        if (trees.Count <= 1)
+        {
+            var results = new List<AnalysisResult>();
+            foreach (var tree in trees)
+            {
+                var model = compilation.GetSemanticModel(tree);
+                var (flowGraph, mutationGraph) = UnifiedAnalyzer.Analyze(model, compilation, tree.FilePath);
+                LogFileSummary(tree.FilePath, flowGraph, mutationGraph, log);
+                results.Add(new AnalysisResult
+                {
+                    Source        = tree.FilePath,
+                    FlowGraph     = flowGraph,
+                    MutationGraph = mutationGraph
+                });
+            }
+            return results;
+        }
+
+        // Multiple files — analyze in parallel.
+        // SemanticModel reads from a shared compilation are thread-safe;
+        // each OperationWalker builds independent per-file graphs.
+        var bag = new ConcurrentBag<AnalysisResult>();
+
+        Parallel.ForEach(trees, tree =>
         {
             var model = compilation.GetSemanticModel(tree);
-
             var (flowGraph, mutationGraph) = UnifiedAnalyzer.Analyze(model, compilation, tree.FilePath);
-
-            LogFileSummary(tree.FilePath, flowGraph, mutationGraph, log);
-
-            results.Add(new AnalysisResult
+            bag.Add(new AnalysisResult
             {
                 Source        = tree.FilePath,
                 FlowGraph     = flowGraph,
                 MutationGraph = mutationGraph
             });
-        }
+        });
 
-        return results;
+        // Sort by file path for deterministic output, then log.
+        var sorted = bag.OrderBy(r => r.Source, StringComparer.OrdinalIgnoreCase).ToList();
+        foreach (var r in sorted)
+            LogFileSummary(r.Source, r.FlowGraph, r.MutationGraph, log);
+
+        return sorted;
     }
 
     private static void LogFileSummary(string filePath, FlowGraph fg, MutationGraph mg, Action<string> log)
