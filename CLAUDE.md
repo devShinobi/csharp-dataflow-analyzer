@@ -119,3 +119,42 @@ Single file → `AnalysisResult`. Multiple files → `AnalysisResult[]`. With `-
   "traversal": { "originSymbolId": "...", "direction": "forward", "root": {} }
 }
 ```
+
+## Conventions
+
+### Naming & Visibility
+
+- Public API lives in `Core` and uses `public` (e.g. `AnalyzerEngine`, model classes).
+- Internal analysis helpers use `internal sealed` (e.g. `OperationWalker`, `SymbolResolver`, `ControlFlowMapper`, `UnifiedAnalyzer`).
+- Private fields are `_camelCase`; local variables and parameters are `camelCase`; types and methods are `PascalCase`.
+- The CLI project references Core but adds **no Roslyn dependency** — all Roslyn types must stay inside Core.
+
+### Logging / Diagnostics
+
+All public Core methods accept an optional `Action<string>? log = null` parameter that defaults to `Console.Error.WriteLine`. This keeps the API decoupled from any specific logging framework.
+
+```csharp
+// Caller can inject a logger:
+engine.AnalyzeFiles(files, msg => myLogger.Info(msg));
+// Or rely on default stderr output.
+```
+
+### Model Classes
+
+- Output model classes (`FlowGraph`, `ClassUnit`, `MutationNode`, etc.) use mutable `{ get; set; }` with `= new()` collection initializers so callers can build graphs incrementally.
+- CLI arg types use `sealed record` (immutable, value-based equality).
+- Do not add Roslyn-specific types to any model or output class.
+
+## Testing
+
+Tests are in `CSharpDataFlowAnalyzer.Tests/` using **xUnit 2.9.3**.
+
+- Tests exercise `GraphTraversalEngine`, `ParsedArgs`, and `AnalyzerEngine.BuildOutput` — all without a live Roslyn compilation.
+- A `file static class Fixture` inside the test file provides builder helpers (`Fixture.Graph(...)`, `Fixture.Edge(...)`, `Fixture.Mutation(...)`) to construct minimal `FlowGraph`/`MutationGraph` fixtures.
+- Test classes are grouped by feature: `ForwardTraversalTests`, `BackwardTraversalTests`, `CycleDetectionTests`, `MutationAttachmentTests`, etc.
+- End-to-end analysis tests (parsing real `.cs` files) go in `TestSamples/` and are exercised manually via `dotnet run`.
+
+```bash
+dotnet test CSharpDataFlowAnalyzer.Tests/          # run all tests
+dotnet test CSharpDataFlowAnalyzer.Tests/ --logger "console;verbosity=normal"
+```

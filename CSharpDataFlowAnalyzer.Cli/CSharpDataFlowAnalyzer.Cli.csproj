@@ -6,7 +6,6 @@
     <ImplicitUsings>disable</ImplicitUsings>
     <AssemblyName>DataFlowAnalyzer</AssemblyName>
     <RootNamespace>CSharpDataFlowAnalyzer</RootNamespace>
-    <Restore>false</Restore>
   </PropertyGroup>
 
   <ItemGroup>

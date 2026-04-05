@@ -5,15 +5,9 @@
     <ImplicitUsings>disable</ImplicitUsings>
     <AssemblyName>CSharpDataFlowAnalyzer.Core</AssemblyName>
     <RootNamespace>CSharpDataFlowAnalyzer</RootNamespace>
-    <Restore>false</Restore>
   </PropertyGroup>
 
   <ItemGroup>
-    <Reference Include="Microsoft.CodeAnalysis">
-      <HintPath>C:\Program Files\dotnet\sdk\10.0.201\Roslyn\bincore\Microsoft.CodeAnalysis.dll</HintPath>
-    </Reference>
-    <Reference Include="Microsoft.CodeAnalysis.CSharp">
-      <HintPath>C:\Program Files\dotnet\sdk\10.0.201\Roslyn\bincore\Microsoft.CodeAnalysis.CSharp.dll</HintPath>
-    </Reference>
+    <PackageReference Include="Microsoft.CodeAnalysis.CSharp" Version="4.13.0" />
   </ItemGroup>
 </Project>
