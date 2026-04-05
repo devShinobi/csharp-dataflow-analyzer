@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Threading;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
@@ -71,22 +72,31 @@ internal sealed class OperationWalker
     {
         var root = _model.SyntaxTree.GetRoot();
 
-        foreach (var typeDecl in root.DescendantNodes().OfType<TypeDeclarationSyntax>())
-            ProcessType(typeDecl);
+        // Ask the compiler for all named types declared in this syntax tree.
+        // This catches classes, structs, records, interfaces, enums, and delegates
+        // without assuming specific syntax node types.
+        var typeSymbols = root.DescendantNodes()
+            .Select(n => _model.GetDeclaredSymbol(n))
+            .OfType<INamedTypeSymbol>()
+            .Where(t => !t.IsImplicitlyDeclared)
+            .Distinct<INamedTypeSymbol>(SymbolEqualityComparer.Default);
+
+        foreach (var typeSymbol in typeSymbols)
+            ProcessTypeFromSymbol(typeSymbol);
+
+        // Handle top-level statements (modern C# Program.cs without a class).
+        ProcessTopLevelStatements(root);
 
         BuildStateChangeSummaries();
         return (_flow, _mutation);
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
-    // Type-level processing
+    // Type-level processing — compiler-driven
     // ═══════════════════════════════════════════════════════════════════════════
 
-    private void ProcessType(TypeDeclarationSyntax typeDecl)
+    private void ProcessTypeFromSymbol(INamedTypeSymbol typeSymbol)
     {
-        var typeSymbol = _model.GetDeclaredSymbol(typeDecl);
-        if (typeSymbol == null) return;
-
         string ns = typeSymbol.ContainingNamespace?.ToDisplayString() ?? "";
         if (ns == "<global namespace>") ns = "";
         string className = typeSymbol.Name;
@@ -97,24 +107,28 @@ internal sealed class OperationWalker
             Id = classId,
             Name = className,
             Namespace = ns.Length > 0 ? ns : null,
-            Kind = typeDecl switch
+            Kind = typeSymbol.TypeKind switch
             {
-                InterfaceDeclarationSyntax => "interface",
-                StructDeclarationSyntax => "struct",
-                RecordDeclarationSyntax => "record",
-                _ => "class"
+                TypeKind.Interface => "interface",
+                TypeKind.Struct => typeSymbol.IsRecord ? "record-struct" : "struct",
+                TypeKind.Enum => "enum",
+                TypeKind.Delegate => "delegate",
+                _ => typeSymbol.IsRecord ? "record" : "class"
             }
         };
 
-        if (typeDecl.BaseList != null)
-            unit.BaseTypes = typeDecl.BaseList.Types.Select(t => t.ToString()).ToList();
+        // Base types — from the symbol, not syntax BaseList
+        if (typeSymbol.BaseType != null && typeSymbol.BaseType.SpecialType != SpecialType.System_Object
+            && typeSymbol.BaseType.SpecialType != SpecialType.System_ValueType)
+            unit.BaseTypes.Add(typeSymbol.BaseType.ToDisplayString());
+        foreach (var iface in typeSymbol.Interfaces)
+            unit.BaseTypes.Add(iface.ToDisplayString());
 
-        // Fields — use IFieldSymbol for exact type info
+        // Fields
         foreach (var member in typeSymbol.GetMembers().OfType<IFieldSymbol>())
         {
             if (member.IsImplicitlyDeclared) continue;
             string fieldId = _resolver.ResolveField(member);
-            var typeInfo = TypeClassifier.Classify(member.Type);
             unit.Fields.Add(new FieldNode
             {
                 Id = fieldId,
@@ -132,7 +146,7 @@ internal sealed class OperationWalker
                 isShared: true, isReadonly: member.IsReadOnly);
         }
 
-        // Properties — use IPropertySymbol
+        // Properties
         foreach (var member in typeSymbol.GetMembers().OfType<IPropertySymbol>())
         {
             if (member.IsImplicitlyDeclared) continue;
@@ -155,34 +169,148 @@ internal sealed class OperationWalker
             RegisterSymbol(propId, member.Name, member.Type, "property", isShared: true);
         }
 
-        // Constructors
-        foreach (var ctor in typeDecl.Members.OfType<ConstructorDeclarationSyntax>())
+        // Methods — ask the compiler for all IMethodSymbol members.
+        // This catches constructors, regular methods, operators, conversions,
+        // finalizers, and primary constructor-generated members.
+        foreach (var member in typeSymbol.GetMembers().OfType<IMethodSymbol>())
         {
-            var ctorSymbol = _model.GetDeclaredSymbol(ctor);
-            if (ctorSymbol == null) continue;
-            string methodId = _resolver.EnterConstructor();
-            var node = BuildMethodNode(methodId, ".ctor", "void", ctorSymbol, ctor.ParameterList);
-            ProcessMethodBody(ctor.Body, ctor.ExpressionBody, node);
-            unit.Constructors.Add(node);
-        }
+            if (member.IsImplicitlyDeclared) continue;
 
-        // Methods
-        foreach (var method in typeDecl.Members.OfType<MethodDeclarationSyntax>())
-        {
-            var methodSymbol = _model.GetDeclaredSymbol(method);
-            if (methodSymbol == null) continue;
-            string methodId = _resolver.EnterMethod(methodSymbol.Name);
-            var node = BuildMethodNode(methodId, methodSymbol.Name,
-                methodSymbol.ReturnType.ToDisplayString(), methodSymbol, method.ParameterList);
-            ProcessMethodBody(method.Body, method.ExpressionBody, node);
-            unit.Methods.Add(node);
+            // Skip property accessors and event accessors — they're modeled via
+            // the property/field, not as standalone methods.
+            if (member.MethodKind is MethodKind.PropertyGet or MethodKind.PropertySet
+                or MethodKind.EventAdd or MethodKind.EventRemove
+                or MethodKind.DelegateInvoke)
+                continue;
+
+            var bodySyntax = GetMethodBodySyntax(member);
+            bool isCtor = member.MethodKind is MethodKind.Constructor or MethodKind.StaticConstructor;
+
+            string methodId = isCtor
+                ? _resolver.EnterConstructor()
+                : _resolver.EnterMethod(member.Name);
+
+            string name = isCtor ? ".ctor" : member.Name;
+            var node = BuildMethodNode(methodId, name, member.ReturnType.ToDisplayString(), member);
+            ProcessMethodBody(bodySyntax, node);
+
+            if (isCtor)
+                unit.Constructors.Add(node);
+            else
+                unit.Methods.Add(node);
         }
 
         _flow.Units.Add(unit);
     }
 
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Top-level statements
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    private void ProcessTopLevelStatements(SyntaxNode root)
+    {
+        var globalStatements = root.ChildNodes().OfType<GlobalStatementSyntax>().ToList();
+        if (globalStatements.Count == 0) return;
+
+        // The compiler synthesizes a Program class with a <Main>$ method.
+        // We surface it as a real ClassUnit so it appears in the output.
+        string classId = _resolver.EnterClass("", "Program");
+
+        // Guard against duplicate if user also defined a partial class Program
+        if (_flow.Units.Any(u => u.Id == classId)) return;
+
+        var unit = new ClassUnit
+        {
+            Id = classId,
+            Name = "Program",
+            Kind = "class"
+        };
+
+        string methodId = _resolver.EnterMethod("<Main>$");
+        var methodNode = new MethodNode
+        {
+            Id = methodId,
+            Name = "<Main>$",
+            ReturnType = "void",
+            Accessibility = "private",
+            IsAsync = false,
+            IsStatic = true
+        };
+
+        // Detect async from presence of await expressions in top-level statements
+        methodNode.IsAsync = globalStatements
+            .Any(gs => gs.DescendantNodes().OfType<AwaitExpressionSyntax>().Any());
+
+        // Walk each global statement's IOperation tree
+        _stmtSeq = 0;
+        _linqCalls.Clear();
+
+        // Try to build CFG from the entry point's body for guard/loop context
+        ControlFlowMapper? cfgMapper = null;
+        var entryPoint = _compilation.GetEntryPoint(CancellationToken.None);
+        if (entryPoint != null)
+        {
+            var entryBody = GetMethodBodySyntax(entryPoint);
+            if (entryBody != null)
+            {
+                var entryOp = _model.GetOperation(entryBody);
+                if (entryOp is IBlockOperation blockOp)
+                {
+                    try
+                    {
+                        var cfg = ControlFlowGraph.Create(blockOp);
+                        cfgMapper = new ControlFlowMapper(cfg);
+                    }
+                    catch (InvalidOperationException) { /* CFG not available for this body form */ }
+                }
+            }
+        }
+
+        foreach (var globalStmt in globalStatements)
+        {
+            var op = _model.GetOperation(globalStmt.Statement);
+            if (op != null)
+                WalkOperation(op, methodNode, cfgMapper);
+        }
+
+        AssembleLinqChains(methodNode);
+        LinkCallEdges(methodNode);
+
+        unit.Methods.Add(methodNode);
+        _flow.Units.Add(unit);
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Method body access — from IMethodSymbol to syntax body
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    /// <summary>
+    /// Resolves an <see cref="IMethodSymbol"/> to the syntax node representing its body.
+    /// Works for regular methods, constructors, operators, conversions, and finalizers.
+    /// Returns null for abstract/extern/partial methods with no body.
+    /// </summary>
+    private static SyntaxNode? GetMethodBodySyntax(IMethodSymbol method)
+    {
+        foreach (var syntaxRef in method.DeclaringSyntaxReferences)
+        {
+            var syntax = syntaxRef.GetSyntax();
+            var result = syntax switch
+            {
+                MethodDeclarationSyntax m           => (SyntaxNode?)m.Body ?? m.ExpressionBody,
+                ConstructorDeclarationSyntax c      => (SyntaxNode?)c.Body ?? c.ExpressionBody,
+                DestructorDeclarationSyntax d       => (SyntaxNode?)d.Body ?? d.ExpressionBody,
+                OperatorDeclarationSyntax o         => (SyntaxNode?)o.Body ?? o.ExpressionBody,
+                ConversionOperatorDeclarationSyntax co => (SyntaxNode?)co.Body ?? co.ExpressionBody,
+                ArrowExpressionClauseSyntax arrow    => arrow,
+                _ => null
+            };
+            if (result != null) return result;
+        }
+        return null;
+    }
+
     private MethodNode BuildMethodNode(string methodId, string name, string returnType,
-        IMethodSymbol methodSymbol, ParameterListSyntax paramList)
+        IMethodSymbol methodSymbol)
     {
         var node = new MethodNode
         {
@@ -226,12 +354,11 @@ internal sealed class OperationWalker
     // Method body processing via IOperation + ControlFlowGraph
     // ═══════════════════════════════════════════════════════════════════════════
 
-    private void ProcessMethodBody(BlockSyntax? body, ArrowExpressionClauseSyntax? exprBody, MethodNode node)
+    private void ProcessMethodBody(SyntaxNode? bodySyntax, MethodNode node)
     {
         _stmtSeq = 0;
         _linqCalls.Clear();
 
-        SyntaxNode? bodySyntax = (SyntaxNode?)body ?? exprBody;
         if (bodySyntax == null) return;
 
         var bodyOp = _model.GetOperation(bodySyntax);
@@ -246,7 +373,7 @@ internal sealed class OperationWalker
                 var cfg = ControlFlowGraph.Create(blockOp);
                 cfgMapper = new ControlFlowMapper(cfg);
             }
-            catch { /* expression bodies or partial code — no CFG, that's OK */ }
+            catch (InvalidOperationException) { /* CFG not supported for this body form */ }
         }
 
         // Walk the IOperation tree
