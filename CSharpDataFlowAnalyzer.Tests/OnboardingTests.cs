@@ -2,7 +2,6 @@ using System.Collections.Generic;
 using System.Linq;
 using Xunit;
 using CSharpDataFlowAnalyzer;
-using CSharpDataFlowAnalyzer.Analysis;
 
 namespace CSharpDataFlowAnalyzer.Tests;
 
@@ -37,21 +36,9 @@ file static class OnboardingFixture
         Id = id, Name = name, Type = type, IsReadonly = isReadonly, IsStatic = isStatic
     };
 
-    public static PropertyNode Property(string id, string name, string type,
-        bool hasSetter = true) => new()
-    {
-        Id = id, Name = name, Type = type, HasGetter = true, HasSetter = hasSetter
-    };
-
     public static ParamNode Param(string name, string type) => new()
     {
         Id = $"ctor/param:{name}", Name = name, Type = type
-    };
-
-    public static CallNode Call(string methodName, string? resolvedMethodId = null) => new()
-    {
-        Id = $"call:{methodName}[0]", MethodName = methodName, Expression = methodName,
-        ResolvedMethodId = resolvedMethodId
     };
 
     public static AnalysisResult Result(string source, params ClassUnit[] units)
@@ -60,16 +47,20 @@ file static class OnboardingFixture
         fg.Units.AddRange(units);
         return new AnalysisResult { Source = source, FlowGraph = fg };
     }
+
+    /// <summary>Runs BuildOnboarding through the public API.</summary>
+    public static OnboardingOutput Onboard(List<AnalysisResult> results, string? explainClassId = null) =>
+        AnalyzerEngine.BuildOnboarding(results, explainClassId, log: _ => { });
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// DependencyAnalyzer tests
+// Dependency graph tests (via AnalyzerEngine.BuildOnboarding)
 // ═══════════════════════════════════════════════════════════════════════════
 
-public class DependencyAnalyzerTests
+public class DependencyGraphTests
 {
     [Fact]
-    public void Analyze_ConstructorParam_CreatesDependencyEdge()
+    public void ConstructorParam_CreatesDependencyEdge()
     {
         var service = OnboardingFixture.Class("MyApp.OrderService", "OrderService", ns: "MyApp");
         var ctor = OnboardingFixture.Method("MyApp.OrderService::ctor[0]", ".ctor");
@@ -79,41 +70,37 @@ public class DependencyAnalyzerTests
         var repo = OnboardingFixture.Class("MyApp.IOrderRepository", "IOrderRepository",
             kind: "interface", ns: "MyApp");
 
-        var results = new List<AnalysisResult>
+        var output = OnboardingFixture.Onboard(new List<AnalysisResult>
         {
             OnboardingFixture.Result("Service.cs", service, repo)
-        };
+        });
 
-        var (graph, _) = DependencyAnalyzer.Analyze(results);
-
-        Assert.Contains(graph.ClassDependencies, e =>
+        Assert.Contains(output.DependencyGraph.ClassDependencies, e =>
             e.From == "MyApp.OrderService" && e.To == "MyApp.IOrderRepository"
             && e.Kind == "constructor-param");
     }
 
     [Fact]
-    public void Analyze_Inheritance_CreatesDependencyEdge()
+    public void Inheritance_CreatesDependencyEdge()
     {
         var derived = OnboardingFixture.Class("MyApp.Dog", "Dog", ns: "MyApp",
             baseTypes: new List<string> { "MyApp.Animal" });
         var baseClass = OnboardingFixture.Class("MyApp.Animal", "Animal", ns: "MyApp");
 
-        var results = new List<AnalysisResult>
+        var output = OnboardingFixture.Onboard(new List<AnalysisResult>
         {
             OnboardingFixture.Result("Animals.cs", derived, baseClass)
-        };
+        });
 
-        var (graph, relationships) = DependencyAnalyzer.Analyze(results);
-
-        Assert.Contains(graph.ClassDependencies, e =>
+        Assert.Contains(output.DependencyGraph.ClassDependencies, e =>
             e.From == "MyApp.Dog" && e.To == "MyApp.Animal" && e.Kind == "inheritance");
 
-        var dogRel = relationships.First(r => r.ClassId == "MyApp.Dog");
+        var dogRel = output.ClassRelationships.First(r => r.ClassId == "MyApp.Dog");
         Assert.Equal("MyApp.Animal", dogRel.BaseClass);
     }
 
     [Fact]
-    public void Analyze_InterfaceImpl_SeparatedFromBaseClass()
+    public void InterfaceImpl_SeparatedFromBaseClass()
     {
         var cls = OnboardingFixture.Class("MyApp.Repo", "Repo", ns: "MyApp",
             baseTypes: new List<string> { "MyApp.IRepository" });
@@ -121,20 +108,18 @@ public class DependencyAnalyzerTests
         var iface = OnboardingFixture.Class("MyApp.IRepository", "IRepository",
             kind: "interface", ns: "MyApp");
 
-        var results = new List<AnalysisResult>
+        var output = OnboardingFixture.Onboard(new List<AnalysisResult>
         {
             OnboardingFixture.Result("Repo.cs", cls, iface)
-        };
+        });
 
-        var (_, relationships) = DependencyAnalyzer.Analyze(results);
-
-        var repoRel = relationships.First(r => r.ClassId == "MyApp.Repo");
-        Assert.Null(repoRel.BaseClass); // IRepository is an interface, not a base class
+        var repoRel = output.ClassRelationships.First(r => r.ClassId == "MyApp.Repo");
+        Assert.Null(repoRel.BaseClass);
         Assert.Contains("MyApp.IRepository", repoRel.ImplementedInterfaces);
     }
 
     [Fact]
-    public void Analyze_FanInFanOut_Computed()
+    public void FanInFanOut_Computed()
     {
         var service = OnboardingFixture.Class("App.Service", "Service", ns: "App");
         var ctor = OnboardingFixture.Method("App.Service::ctor[0]", ".ctor");
@@ -147,83 +132,75 @@ public class DependencyAnalyzerTests
         consumerCtor.Params.Add(OnboardingFixture.Param("svc", "Service"));
         consumer.Constructors.Add(consumerCtor);
 
-        var results = new List<AnalysisResult>
+        var output = OnboardingFixture.Onboard(new List<AnalysisResult>
         {
             OnboardingFixture.Result("App.cs", service, repo, consumer)
-        };
+        });
 
-        var (_, relationships) = DependencyAnalyzer.Analyze(results);
-
-        var serviceRel = relationships.First(r => r.ClassId == "App.Service");
+        var serviceRel = output.ClassRelationships.First(r => r.ClassId == "App.Service");
         Assert.True(serviceRel.FanOut >= 1, "Service depends on Repo → fanOut >= 1");
         Assert.True(serviceRel.FanIn >= 1, "Consumer depends on Service → fanIn >= 1");
     }
 
     [Fact]
-    public void Analyze_FieldType_CreatesDependencyEdge()
+    public void FieldType_CreatesDependencyEdge()
     {
         var service = OnboardingFixture.Class("App.Service", "Service", ns: "App");
         service.Fields.Add(OnboardingFixture.Field("App.Service::field:_repo", "_repo", "Repo"));
 
         var repo = OnboardingFixture.Class("App.Repo", "Repo", ns: "App");
 
-        var results = new List<AnalysisResult>
+        var output = OnboardingFixture.Onboard(new List<AnalysisResult>
         {
             OnboardingFixture.Result("App.cs", service, repo)
-        };
+        });
 
-        var (graph, _) = DependencyAnalyzer.Analyze(results);
-
-        Assert.Contains(graph.ClassDependencies, e =>
+        Assert.Contains(output.DependencyGraph.ClassDependencies, e =>
             e.From == "App.Service" && e.To == "App.Repo" && e.Kind == "field-type");
     }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// EntryPointDetector tests
+// Entry point detection tests (via AnalyzerEngine.BuildOnboarding)
 // ═══════════════════════════════════════════════════════════════════════════
 
-public class EntryPointDetectorTests
+public class EntryPointTests
 {
     [Fact]
-    public void Detect_MainMethod_ReturnsMainEntryPoint()
+    public void MainMethod_Detected()
     {
         var program = OnboardingFixture.Class("Program", "Program");
         program.Methods.Add(OnboardingFixture.Method("Program::Main[0]", "Main",
             isStatic: true));
 
-        var results = new List<AnalysisResult>
+        var output = OnboardingFixture.Onboard(new List<AnalysisResult>
         {
             OnboardingFixture.Result("Program.cs", program)
-        };
+        });
 
-        var entryPoints = EntryPointDetector.Detect(results);
-
-        Assert.Single(entryPoints);
-        Assert.Equal("main", entryPoints[0].Kind);
-        Assert.Equal("Program", entryPoints[0].ClassId);
+        Assert.Single(output.EntryPoints);
+        Assert.Equal("main", output.EntryPoints[0].Kind);
+        Assert.Equal("Program", output.EntryPoints[0].ClassId);
     }
 
     [Fact]
-    public void Detect_TopLevelStatements_ReturnsSyntheticMain()
+    public void TopLevelStatements_DetectedAsSyntheticMain()
     {
         var program = OnboardingFixture.Class("Program", "Program");
         program.Methods.Add(OnboardingFixture.Method("Program::<Main>$[0]", "<Main>$",
             isStatic: true));
 
-        var results = new List<AnalysisResult>
+        var output = OnboardingFixture.Onboard(new List<AnalysisResult>
         {
             OnboardingFixture.Result("Program.cs", program)
-        };
+        });
 
-        var entryPoints = EntryPointDetector.Detect(results);
-
-        Assert.Single(entryPoints);
-        Assert.Equal("main", entryPoints[0].Kind);
+        Assert.Single(output.EntryPoints);
+        Assert.Equal("main", output.EntryPoints[0].Kind);
     }
 
     [Fact]
-    public void Detect_ControllerWithActions_ReturnsControllerActions()
+    public void ControllerActions_Detected()
     {
         var controller = OnboardingFixture.Class("Api.OrderController", "OrderController",
             ns: "Api",
@@ -237,21 +214,19 @@ public class EntryPointDetectorTests
             "Api.OrderController::Create[0]", "Create",
             attributes: new List<string> { "Microsoft.AspNetCore.Mvc.HttpPostAttribute" }));
 
-        var results = new List<AnalysisResult>
+        var output = OnboardingFixture.Onboard(new List<AnalysisResult>
         {
             OnboardingFixture.Result("OrderController.cs", controller)
-        };
+        });
 
-        var entryPoints = EntryPointDetector.Detect(results);
-
-        Assert.Equal(2, entryPoints.Count);
-        Assert.All(entryPoints, ep => Assert.Equal("controller-action", ep.Kind));
-        Assert.Contains(entryPoints, ep => ep.HttpMethod == "GET");
-        Assert.Contains(entryPoints, ep => ep.HttpMethod == "POST");
+        Assert.Equal(2, output.EntryPoints.Count);
+        Assert.All(output.EntryPoints, ep => Assert.Equal("controller-action", ep.Kind));
+        Assert.Contains(output.EntryPoints, ep => ep.HttpMethod == "GET");
+        Assert.Contains(output.EntryPoints, ep => ep.HttpMethod == "POST");
     }
 
     [Fact]
-    public void Detect_BackgroundService_ReturnsBackgroundServiceEntryPoint()
+    public void BackgroundService_Detected()
     {
         var service = OnboardingFixture.Class("Workers.Processor", "Processor",
             ns: "Workers",
@@ -261,20 +236,18 @@ public class EntryPointDetectorTests
             "Workers.Processor::ExecuteAsync[0]", "ExecuteAsync",
             isAsync: true, returnType: "Task"));
 
-        var results = new List<AnalysisResult>
+        var output = OnboardingFixture.Onboard(new List<AnalysisResult>
         {
             OnboardingFixture.Result("Processor.cs", service)
-        };
+        });
 
-        var entryPoints = EntryPointDetector.Detect(results);
-
-        Assert.Single(entryPoints);
-        Assert.Equal("background-service", entryPoints[0].Kind);
-        Assert.Equal("Workers.Processor::ExecuteAsync[0]", entryPoints[0].MethodId);
+        Assert.Single(output.EntryPoints);
+        Assert.Equal("background-service", output.EntryPoints[0].Kind);
+        Assert.Equal("Workers.Processor::ExecuteAsync[0]", output.EntryPoints[0].MethodId);
     }
 
     [Fact]
-    public void Detect_MediatRHandler_ReturnsHandler()
+    public void MediatRHandler_Detected()
     {
         var handler = OnboardingFixture.Class("Handlers.CreateOrder", "CreateOrder",
             ns: "Handlers",
@@ -284,105 +257,78 @@ public class EntryPointDetectorTests
             "Handlers.CreateOrder::Handle[0]", "Handle",
             isAsync: true));
 
-        var results = new List<AnalysisResult>
+        var output = OnboardingFixture.Onboard(new List<AnalysisResult>
         {
             OnboardingFixture.Result("CreateOrder.cs", handler)
-        };
+        });
 
-        var entryPoints = EntryPointDetector.Detect(results);
-
-        Assert.Single(entryPoints);
-        Assert.Equal("mediatr-handler", entryPoints[0].Kind);
+        Assert.Single(output.EntryPoints);
+        Assert.Equal("mediatr-handler", output.EntryPoints[0].Kind);
     }
 
     [Fact]
-    public void Detect_NoEntryPoints_ReturnsEmptyList()
+    public void NoEntryPoints_ReturnsEmptyList()
     {
         var dto = OnboardingFixture.Class("Models.OrderDto", "OrderDto",
             kind: "record", ns: "Models");
 
-        var results = new List<AnalysisResult>
+        var output = OnboardingFixture.Onboard(new List<AnalysisResult>
         {
             OnboardingFixture.Result("OrderDto.cs", dto)
-        };
+        });
 
-        var entryPoints = EntryPointDetector.Detect(results);
-
-        Assert.Empty(entryPoints);
+        Assert.Empty(output.EntryPoints);
     }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// HotPathDetector tests
+// Hot node tests (uses public model types directly — no internals needed)
 // ═══════════════════════════════════════════════════════════════════════════
 
-public class HotPathDetectorTests
+public class HotNodeTests
 {
     [Fact]
-    public void Detect_RankedByTotalConnections()
+    public void HotNodes_RankedByTotalConnections()
     {
-        var relationships = new List<ClassRelationship>
+        // Build a graph where Service has the most connections
+        var service = OnboardingFixture.Class("App.Service", "Service", ns: "App");
+        var serviceCtor = OnboardingFixture.Method("App.Service::ctor[0]", ".ctor");
+        serviceCtor.Params.Add(OnboardingFixture.Param("repoA", "RepoA"));
+        serviceCtor.Params.Add(OnboardingFixture.Param("repoB", "RepoB"));
+        service.Constructors.Add(serviceCtor);
+
+        var repoA = OnboardingFixture.Class("App.RepoA", "RepoA", ns: "App");
+        var repoB = OnboardingFixture.Class("App.RepoB", "RepoB", ns: "App");
+
+        var consumer = OnboardingFixture.Class("App.Consumer", "Consumer", ns: "App");
+        var consumerCtor = OnboardingFixture.Method("App.Consumer::ctor[0]", ".ctor");
+        consumerCtor.Params.Add(OnboardingFixture.Param("svc", "Service"));
+        consumer.Constructors.Add(consumerCtor);
+
+        var output = OnboardingFixture.Onboard(new List<AnalysisResult>
         {
-            new() { ClassId = "A", ClassName = "A", FanIn = 5, FanOut = 3 },
-            new() { ClassId = "B", ClassName = "B", FanIn = 1, FanOut = 1 },
-            new() { ClassId = "C", ClassName = "C", FanIn = 3, FanOut = 4 },
-        };
+            OnboardingFixture.Result("App.cs", service, repoA, repoB, consumer)
+        });
 
-        var hotNodes = HotPathDetector.Detect(relationships, topN: 3);
-
-        Assert.Equal(3, hotNodes.Count);
-        Assert.Equal("A", hotNodes[0].ClassId); // 5+3 = 8 total
-        Assert.Equal(1, hotNodes[0].Rank);
-        Assert.Equal("C", hotNodes[1].ClassId); // 3+4 = 7 total
-        Assert.Equal(2, hotNodes[1].Rank);
-        Assert.Equal("B", hotNodes[2].ClassId); // 1+1 = 2 total
-        Assert.Equal(3, hotNodes[2].Rank);
+        Assert.NotEmpty(output.HotNodes);
+        // Service should rank highest: fanOut=2 (RepoA, RepoB) + fanIn=1 (Consumer)
+        Assert.Equal("App.Service", output.HotNodes[0].ClassId);
+        Assert.Equal(1, output.HotNodes[0].Rank);
     }
 
     [Fact]
-    public void Detect_RoleClassification_Hub()
+    public void HotNodes_EmptyInput_ReturnsEmpty()
     {
-        var relationships = new List<ClassRelationship>
-        {
-            new() { ClassId = "Hub", ClassName = "Hub", FanIn = 10, FanOut = 10 },
-            new() { ClassId = "Leaf1", ClassName = "Leaf1", FanIn = 0, FanOut = 0 },
-            new() { ClassId = "Leaf2", ClassName = "Leaf2", FanIn = 0, FanOut = 0 },
-        };
-
-        var hotNodes = HotPathDetector.Detect(relationships, topN: 3);
-
-        Assert.Equal("hub", hotNodes[0].Role);
-    }
-
-    [Fact]
-    public void Detect_TopN_LimitsOutput()
-    {
-        var relationships = Enumerable.Range(0, 20)
-            .Select(i => new ClassRelationship
-            {
-                ClassId = $"Class{i}", ClassName = $"Class{i}",
-                FanIn = 20 - i, FanOut = i
-            })
-            .ToList();
-
-        var hotNodes = HotPathDetector.Detect(relationships, topN: 5);
-
-        Assert.Equal(5, hotNodes.Count);
-    }
-
-    [Fact]
-    public void Detect_EmptyInput_ReturnsEmpty()
-    {
-        var hotNodes = HotPathDetector.Detect(new List<ClassRelationship>());
-        Assert.Empty(hotNodes);
+        var output = OnboardingFixture.Onboard(new List<AnalysisResult>());
+        Assert.Empty(output.HotNodes);
     }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// ClassExplainer tests
+// Class explanation tests (via --explain through BuildOnboarding)
 // ═══════════════════════════════════════════════════════════════════════════
 
-public class ClassExplainerTests
+public class ClassExplanationTests
 {
     [Fact]
     public void Explain_InfersStatelessUtility()
@@ -391,20 +337,12 @@ public class ClassExplainerTests
         utility.Methods.Add(OnboardingFixture.Method("Utils.Helpers::Format[0]", "Format",
             isStatic: true, returnType: "string"));
 
-        var results = new List<AnalysisResult>
-        {
-            OnboardingFixture.Result("Helpers.cs", utility)
-        };
+        var output = OnboardingFixture.Onboard(
+            new List<AnalysisResult> { OnboardingFixture.Result("Helpers.cs", utility) },
+            explainClassId: "Utils.Helpers");
 
-        var explanation = ClassExplainer.Explain("Utils.Helpers", results,
-            new List<ClassRelationship>
-            {
-                new() { ClassId = "Utils.Helpers", ClassName = "Helpers", Kind = "class" }
-            },
-            new List<EntryPoint>(), new List<HotNode>());
-
-        Assert.NotNull(explanation);
-        Assert.Contains("Stateless utility/helper class", explanation!.Responsibilities);
+        Assert.NotNull(output.ClassExplanation);
+        Assert.Contains("Stateless utility/helper class", output.ClassExplanation!.Responsibilities);
     }
 
     [Fact]
@@ -413,21 +351,13 @@ public class ClassExplainerTests
         var entity = OnboardingFixture.Class("Models.Order", "Order", ns: "Models");
         entity.Fields.Add(OnboardingFixture.Field("Models.Order::field:_items", "_items", "List<OrderItem>"));
 
-        var results = new List<AnalysisResult>
-        {
-            OnboardingFixture.Result("Order.cs", entity)
-        };
+        var output = OnboardingFixture.Onboard(
+            new List<AnalysisResult> { OnboardingFixture.Result("Order.cs", entity) },
+            explainClassId: "Models.Order");
 
-        var explanation = ClassExplainer.Explain("Models.Order", results,
-            new List<ClassRelationship>
-            {
-                new() { ClassId = "Models.Order", ClassName = "Order", Kind = "class" }
-            },
-            new List<EntryPoint>(), new List<HotNode>());
-
-        Assert.NotNull(explanation);
-        Assert.Contains(explanation!.Responsibilities, r => r.Contains("mutable state"));
-        Assert.True(explanation.State.HasMutableState);
+        Assert.NotNull(output.ClassExplanation);
+        Assert.Contains(output.ClassExplanation!.Responsibilities, r => r.Contains("mutable state"));
+        Assert.True(output.ClassExplanation.State.HasMutableState);
     }
 
     [Fact]
@@ -436,31 +366,22 @@ public class ClassExplainerTests
         var cls = OnboardingFixture.Class("Deep.Namespace.OrderService", "OrderService",
             ns: "Deep.Namespace");
 
-        var results = new List<AnalysisResult>
-        {
-            OnboardingFixture.Result("OrderService.cs", cls)
-        };
+        var output = OnboardingFixture.Onboard(
+            new List<AnalysisResult> { OnboardingFixture.Result("OrderService.cs", cls) },
+            explainClassId: "OrderService");
 
-        // Look up by short name
-        var explanation = ClassExplainer.Explain("OrderService", results,
-            new List<ClassRelationship>(), new List<EntryPoint>(), new List<HotNode>());
-
-        Assert.NotNull(explanation);
-        Assert.Equal("OrderService", explanation!.ClassName);
+        Assert.NotNull(output.ClassExplanation);
+        Assert.Equal("OrderService", output.ClassExplanation!.ClassName);
     }
 
     [Fact]
     public void Explain_UnknownClass_ReturnsNull()
     {
-        var results = new List<AnalysisResult>
-        {
-            OnboardingFixture.Result("Empty.cs")
-        };
+        var output = OnboardingFixture.Onboard(
+            new List<AnalysisResult> { OnboardingFixture.Result("Empty.cs") },
+            explainClassId: "NonExistent");
 
-        var explanation = ClassExplainer.Explain("NonExistent", results,
-            new List<ClassRelationship>(), new List<EntryPoint>(), new List<HotNode>());
-
-        Assert.Null(explanation);
+        Assert.Null(output.ClassExplanation);
     }
 }
 
@@ -504,7 +425,7 @@ public class ParsedArgsOnboardingTests
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// HtmlReportGenerator tests
+// HtmlReportGenerator tests (uses public API only)
 // ═══════════════════════════════════════════════════════════════════════════
 
 public class HtmlReportGeneratorTests
