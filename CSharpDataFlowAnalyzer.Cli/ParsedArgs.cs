@@ -10,7 +10,10 @@ public sealed record ParsedArgs(
     string?       TraceForwardId,
     string?       TraceBackwardId,
     int           TraceDepth,
-    bool          PrettyPrint)
+    bool          PrettyPrint,
+    bool          Onboard,
+    string?       ExplainClassId,
+    string        Format)
 {
     public static ParsedArgs Parse(string[] args)
     {
@@ -19,6 +22,9 @@ public sealed record ParsedArgs(
         string? traceBackwardId = null;
         int     traceDepth      = 20;
         bool    prettyPrint     = true;
+        bool    onboard         = false;
+        string? explainClassId  = null;
+        string  format          = "json";
         var     inputPaths      = new List<string>();
 
         for (int i = 0; i < args.Length; i++)
@@ -40,6 +46,16 @@ public sealed record ParsedArgs(
                 case "--compact":
                     prettyPrint = false;
                     break;
+                case "--onboard":
+                    onboard = true;
+                    break;
+                case "--explain":
+                    if (i + 1 < args.Length) explainClassId = args[++i];
+                    onboard = true; // --explain implies --onboard
+                    break;
+                case "--format":
+                    if (i + 1 < args.Length) format = args[++i].ToLowerInvariant();
+                    break;
                 default:
                     inputPaths.Add(args[i]);
                     break;
@@ -49,6 +65,7 @@ public sealed record ParsedArgs(
             Console.Error.WriteLine(
                 "Warning: --trace-forward and --trace-backward both supplied; using forward.");
 
-        return new ParsedArgs(inputPaths, outputPath, traceForwardId, traceBackwardId, traceDepth, prettyPrint);
+        return new ParsedArgs(inputPaths, outputPath, traceForwardId, traceBackwardId,
+            traceDepth, prettyPrint, onboard, explainClassId, format);
     }
 }

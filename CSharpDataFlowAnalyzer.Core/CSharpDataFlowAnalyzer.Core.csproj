@@ -10,4 +10,8 @@
   <ItemGroup>
     <PackageReference Include="Microsoft.CodeAnalysis.CSharp" Version="4.13.0" />
   </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="CSharpDataFlowAnalyzer.Tests" />
+  </ItemGroup>
 </Project>

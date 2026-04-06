@@ -391,7 +391,8 @@ internal sealed class OperationWalker
                 var cfg = ControlFlowGraph.Create(blockOp);
                 cfgMapper = new ControlFlowMapper(cfg);
             }
-            catch (InvalidOperationException) { /* CFG not supported for this body form */ }
+            catch (Exception ex) when (ex is InvalidOperationException or ArgumentException)
+            { /* CFG not available — non-root block, partial code, etc. */ }
         }
 
         // Walk the IOperation tree

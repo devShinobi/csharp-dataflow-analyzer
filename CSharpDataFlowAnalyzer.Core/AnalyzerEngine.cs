@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
+using CSharpDataFlowAnalyzer.Analysis;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 
@@ -294,5 +295,39 @@ public static class AnalyzerEngine
         }
 
         return new MultiFileOutput { Results = results, Traversal = traversal };
+    }
+
+    // ── Onboarding (Phase 2) ─────────────────────────────────────────────────
+
+    /// <summary>
+    /// Post-processes analysis results to produce an onboarding report:
+    /// dependency graph, entry points, hot nodes, and optional class explanation.
+    /// </summary>
+    /// <param name="log">Receives diagnostic messages. Defaults to <c>Console.Error.WriteLine</c>.</param>
+    public static OnboardingOutput BuildOnboarding(
+        List<AnalysisResult> results,
+        string?              explainClassId = null,
+        Action<string>?      log = null)
+    {
+        log ??= Console.Error.WriteLine;
+
+        log("Building onboarding report...");
+        var (graph, relationships) = DependencyAnalyzer.Analyze(results, log);
+        var entryPoints = EntryPointDetector.Detect(results, log);
+        var hotNodes = HotPathDetector.Detect(relationships, topN: 10, log);
+
+        ClassExplanation? explanation = null;
+        if (explainClassId != null)
+            explanation = ClassExplainer.Explain(explainClassId, results, relationships, entryPoints, hotNodes, log);
+
+        return new OnboardingOutput
+        {
+            DependencyGraph = graph,
+            EntryPoints = entryPoints,
+            ClassRelationships = relationships,
+            HotNodes = hotNodes,
+            ClassExplanation = explanation,
+            Results = results
+        };
     }
 }
