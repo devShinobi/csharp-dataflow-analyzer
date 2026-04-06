@@ -320,6 +320,24 @@ public static class AnalyzerEngine
         if (explainClassId != null)
             explanation = ClassExplainer.Explain(explainClassId, results, relationships, entryPoints, hotNodes, log);
 
+        // Explain all classes, capped at 50 ranked by hot score (fan-in + fan-out).
+        // For small codebases all classes are explained; for large ones only the most connected ones.
+        const int MaxExplained = 50;
+        var allClassIds = relationships
+            .OrderByDescending(r => r.FanIn + r.FanOut)
+            .Take(MaxExplained)
+            .Select(r => r.ClassId)
+            .ToList();
+
+        log($"  Explaining {allClassIds.Count} class(es) for HTML report...");
+        var classExplanations = new Dictionary<string, ClassExplanation>();
+        foreach (var cid in allClassIds)
+        {
+            var exp = ClassExplainer.Explain(cid, results, relationships, entryPoints, hotNodes);
+            if (exp != null)
+                classExplanations[cid] = exp;
+        }
+
         return new OnboardingOutput
         {
             DependencyGraph = graph,
@@ -327,6 +345,7 @@ public static class AnalyzerEngine
             ClassRelationships = relationships,
             HotNodes = hotNodes,
             ClassExplanation = explanation,
+            ClassExplanations = classExplanations,
             Results = results
         };
     }

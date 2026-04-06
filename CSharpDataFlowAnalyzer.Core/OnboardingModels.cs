@@ -23,6 +23,9 @@ public class OnboardingOutput
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public ClassExplanation? ClassExplanation { get; set; }
 
+    [JsonPropertyName("classExplanations")]
+    public Dictionary<string, ClassExplanation> ClassExplanations { get; set; } = new();
+
     [JsonPropertyName("results")]
     public List<AnalysisResult> Results { get; set; } = new();
 }
