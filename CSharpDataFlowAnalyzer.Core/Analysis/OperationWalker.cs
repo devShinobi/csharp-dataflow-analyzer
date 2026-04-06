@@ -307,10 +307,15 @@ internal sealed class OperationWalker
     /// Works for regular methods, constructors, operators, conversions, and finalizers.
     /// Returns null for abstract/extern/partial methods with no body.
     /// </summary>
-    private static SyntaxNode? GetMethodBodySyntax(IMethodSymbol method)
+    private SyntaxNode? GetMethodBodySyntax(IMethodSymbol method)
     {
+        var currentTree = _model.SyntaxTree;
         foreach (var syntaxRef in method.DeclaringSyntaxReferences)
         {
+            // Only consider syntax nodes that belong to the current tree.
+            // Partial classes may have members declared in other files.
+            if (syntaxRef.SyntaxTree != currentTree) continue;
+
             var syntax = syntaxRef.GetSyntax();
             var result = syntax switch
             {
@@ -1036,7 +1041,9 @@ internal sealed class OperationWalker
 
     private void BuildAliases()
     {
-        var symById = _mutation.Symbols.ToDictionary(s => s.Id);
+        var symById = new Dictionary<string, SymbolInfo>(_mutation.Symbols.Count);
+        foreach (var s in _mutation.Symbols)
+            symById.TryAdd(s.Id, s);
 
         foreach (var unit in _flow.Units)
             foreach (var method in unit.Methods.Concat(unit.Constructors))
