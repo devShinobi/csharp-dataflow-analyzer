@@ -1,7 +1,9 @@
 {
   "permissions": {
     "allow": [
-      "Bash(dotnet test:*)"
+      "Bash(dotnet test:*)",
+      "WebSearch",
+      "Bash(node -e ':*)"
     ]
   }
 }
