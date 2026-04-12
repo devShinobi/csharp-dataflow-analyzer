@@ -439,11 +439,68 @@ internal sealed class OperationWalker
             case IForEachLoopOperation forEach:
                 ProcessForEach(forEach, method, cfgMapper);
                 return;
+
+            case IInvalidOperation invalid:
+                // Roslyn can't semantically resolve this operation (e.g. call to an extension
+                // method from an unreferenced NuGet package).  Fall back to syntax-level
+                // extraction so that calls like MapPut/MapGet still appear in method.Calls.
+                TryExtractCallFromSyntax(invalid.Syntax, method);
+                foreach (var child in invalid.ChildOperations)
+                    WalkOperation(child, method, cfgMapper);
+                return;
         }
 
         // Default: recurse into children
         foreach (var child in operation.ChildOperations)
             WalkOperation(child, method, cfgMapper);
+    }
+
+    /// <summary>
+    /// Syntax-level fallback: when Roslyn produces <see cref="IInvalidOperation"/> for an
+    /// unresolved invocation (e.g. extension methods from unreferenced NuGet packages),
+    /// extract the method name and arguments from the syntax node so that detection
+    /// heuristics (e.g. minimal-API MapGet/MapPost detection) still have data to work with.
+    /// </summary>
+    private void TryExtractCallFromSyntax(SyntaxNode? syntax, MethodNode method)
+    {
+        if (syntax is not InvocationExpressionSyntax invSyntax) return;
+
+        string methodName = invSyntax.Expression switch
+        {
+            MemberAccessExpressionSyntax mae => mae.Name.Identifier.Text,
+            IdentifierNameSyntax id          => id.Identifier.Text,
+            _                                => ""
+        };
+        if (string.IsNullOrEmpty(methodName)) return;
+
+        string callText = invSyntax.ToString();
+        string callId   = _resolver.NextCallId(callText);
+
+        string? receiver = invSyntax.Expression is MemberAccessExpressionSyntax maeSyntax
+            ? maeSyntax.Expression.ToString()
+            : null;
+
+        var callNode = new CallNode
+        {
+            Id              = callId,
+            Expression      = callText.Length > 80 ? callText[..80] + "…" : callText,
+            MethodName      = methodName,
+            Receiver        = receiver,
+            ResolvedMethodId = null,  // No semantic info available
+            SequenceOrder   = _stmtSeq++
+        };
+
+        int argIdx = 0;
+        foreach (var arg in invSyntax.ArgumentList.Arguments)
+        {
+            callNode.Arguments.Add(new ArgumentNode
+            {
+                Index      = argIdx++,
+                Expression = arg.ToString()
+            });
+        }
+
+        method.Calls.Add(callNode);
     }
 
     // ── Local declaration ────────────────────────────────────────────────────

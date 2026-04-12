@@ -158,6 +158,16 @@ internal sealed class ClassExplainer
         return flows;
     }
 
+    // Framework namespace prefixes whose calls add noise to key flows.
+    private static readonly string[] FrameworkPrefixes =
+    {
+        "System.", "Microsoft.Extensions.", "Microsoft.AspNetCore.",
+        "Microsoft.EntityFrameworkCore.", "MediatR."
+    };
+
+    private static bool IsFrameworkMethod(string methodId) =>
+        FrameworkPrefixes.Any(p => methodId.StartsWith(p, StringComparison.Ordinal));
+
     private static void CollectCallChain(
         MethodNode method,
         List<AnalysisResult> results,
@@ -170,6 +180,8 @@ internal sealed class ClassExplainer
         foreach (var call in method.Calls)
         {
             if (call.ResolvedMethodId == null) continue;
+            // Skip framework/BCL calls — they add noise for new developers
+            if (IsFrameworkMethod(call.ResolvedMethodId)) continue;
             if (!visited.Add(call.ResolvedMethodId)) continue;
 
             chain.Add(call.ResolvedMethodId);
@@ -229,25 +241,60 @@ internal sealed class ClassExplainer
     {
         var responsibilities = new List<string>();
 
-        // Entry point roles
+        // ── Interfaces: derive from method signatures ──────────────────────────
+        if (unit.Kind == "interface")
+        {
+            var methodNames = unit.Methods.Select(m => m.Name).ToList();
+            if (methodNames.Count > 0)
+                responsibilities.Add($"Defines contract: {string.Join(", ", methodNames)}");
+            return responsibilities;
+        }
+
+        // ── Entry point roles ──────────────────────────────────────────────────
         var classEntryPoints = entryPoints.Where(e => e.ClassId == unit.Id).ToList();
-        foreach (var ep in classEntryPoints)
+
+        // Deduplicate minimal-api entries to one "Maps N HTTP endpoints" line
+        var minimalApiEps = classEntryPoints.Where(e => e.Kind == "minimal-api").ToList();
+        if (minimalApiEps.Count > 0)
+        {
+            var routes = minimalApiEps
+                .Where(e => e.HttpMethod != null && e.Route != null)
+                .Select(e => $"{e.HttpMethod} {e.Route}")
+                .Distinct()
+                .ToList();
+            string detail = routes.Count > 0
+                ? string.Join(", ", routes)
+                : $"{minimalApiEps.Count} endpoint(s)";
+            responsibilities.Add($"Minimal API endpoint mapper ({detail})");
+        }
+
+        foreach (var ep in classEntryPoints.Where(e => e.Kind != "minimal-api"))
         {
             responsibilities.Add(ep.Kind switch
             {
-                "main" => "Application entry point",
-                "controller-action" => $"Handles HTTP requests ({ep.HttpMethod ?? "mixed methods"})",
-                "minimal-api" => $"Defines minimal API endpoint ({ep.HttpMethod} {ep.Route ?? ""})",
+                "main"               => "Application entry point",
+                "controller-action"  => $"Handles HTTP requests ({ep.HttpMethod ?? "mixed methods"})",
                 "background-service" => "Long-running background service",
-                "mediatr-handler" => "Handles MediatR requests/notifications",
-                _ => $"Entry point ({ep.Kind})"
+                "mediatr-handler"    => "Handles MediatR requests/notifications",
+                _                    => $"Entry point ({ep.Kind})"
             });
         }
 
-        // DI dependencies
+        // ── Minimal-API mapper heuristic (static class returning RouteGroupBuilder) ──
+        // Fires when the class was not detected as an entry point via calls (e.g. calls
+        // couldn't be resolved semantically) but clearly maps HTTP routes by signature.
+        if (minimalApiEps.Count == 0 && unit.Kind == "class"
+            && unit.Methods.Any(m => m.IsStatic && (
+                m.ReturnType.Contains("RouteGroupBuilder") ||
+                m.ReturnType.Contains("IEndpointRouteBuilder") ||
+                m.Params.Any(p => p.Type.Contains("IEndpointRouteBuilder")))))
+        {
+            responsibilities.Add("Minimal API endpoint mapper (static extension class)");
+        }
+
+        // ── DI constructor dependencies ────────────────────────────────────────
         if (relationship.ConstructorParams.Count > 0)
         {
-            // Only count params that resolve to known classes (DI services), not primitives
             var serviceParams = relationship.ConstructorParams
                 .Where(p => p.ResolvedClassId != null)
                 .Select(p => StripGenericArgs(p.Type))
@@ -257,25 +304,49 @@ internal sealed class ClassExplainer
                                       string.Join(", ", serviceParams));
         }
 
-        // State management
+        // ── State management ───────────────────────────────────────────────────
         int mutableFieldCount = unit.Fields.Count(f => !f.IsReadonly && !f.IsStatic);
+        bool alreadyHasApiMapperLabel = responsibilities.Any(r => r.Contains("endpoint mapper"));
         if (mutableFieldCount > 0)
             responsibilities.Add($"Manages mutable state ({mutableFieldCount} field(s))");
-        else if (unit.Fields.Count == 0 && unit.Properties.Count == 0
+        else if (!alreadyHasApiMapperLabel
+                 && unit.Fields.Count == 0 && unit.Properties.Count == 0
                  && unit.Methods.All(m => m.IsStatic))
             responsibilities.Add("Stateless utility/helper class");
 
-        // Interface implementations
+        // ── Interface implementations ──────────────────────────────────────────
         if (relationship.ImplementedInterfaces.Count > 0)
             responsibilities.Add($"Implements {string.Join(", ", relationship.ImplementedInterfaces)}");
 
-        // Data model detection
+        // ── Data model detection ───────────────────────────────────────────────
         if (unit.Kind is "record" or "record-struct" or "enum")
+        {
             responsibilities.Add($"Data model ({unit.Kind})");
+        }
         else if (unit.Fields.Count == 0 && unit.Properties.Count > 2 && unit.Methods.Count == 0)
-            responsibilities.Add("Data transfer object (DTO)");
+        {
+            // Only label as DTO if properties look like primitive data fields,
+            // not a service parameter group ([AsParameters] pattern).
+            bool looksLikeServiceGroup = unit.Properties.Count > 0
+                && unit.Properties.All(p =>
+                {
+                    // Use the simple name (last segment of a fully-qualified type name)
+                    // so "eShop.Foo.IOrderQueries" → "IOrderQueries"
+                    string simpleName = p.Type;
+                    int dotIdx = simpleName.LastIndexOf('.');
+                    if (dotIdx >= 0) simpleName = simpleName[(dotIdx + 1)..];
 
-        // Disposable resource management
+                    return simpleName.StartsWith('I')  // interface (IMediator, ILogger, IOrderQueries…)
+                        || p.Type.Contains("Logger")
+                        || p.Type.Contains("Service")
+                        || p.Type.Contains("Repository")
+                        || p.Type.Contains("Manager");
+                });
+            if (!looksLikeServiceGroup)
+                responsibilities.Add("Data transfer object (DTO)");
+        }
+
+        // ── Disposable resource management ────────────────────────────────────
         if (unit.BaseTypes.Any(bt => bt.Contains("IDisposable")))
             responsibilities.Add("Manages disposable resources");
 

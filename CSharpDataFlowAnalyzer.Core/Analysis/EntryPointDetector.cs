@@ -69,6 +69,19 @@ internal sealed class EntryPointDetector
             }
         }
 
+        // Deduplicate — the same (ClassId, MethodId, Kind) can appear when
+        // partial class files or Program.Testing.cs re-declare the same type.
+        // For minimal-api entries each route+method combination is distinct,
+        // so include those in the key to preserve all mapped endpoints.
+        var seen = new HashSet<string>();
+        entryPoints.RemoveAll(ep =>
+        {
+            string key = ep.Kind == "minimal-api"
+                ? $"{ep.ClassId}|{ep.Kind}|{ep.HttpMethod}|{ep.Route}"
+                : $"{ep.ClassId}|{ep.MethodId}|{ep.Kind}";
+            return !seen.Add(key);
+        });
+
         log?.Invoke($"  Entry points: {entryPoints.Count} detected " +
                      $"({entryPoints.GroupBy(e => e.Kind).Select(g => $"{g.Count()} {g.Key}").DefaultIfEmpty("none").Aggregate((a, b) => $"{a}, {b}")})");
 

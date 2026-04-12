@@ -214,7 +214,7 @@ public static class HtmlReportGenerator
 
                 if (exp?.KeyFlows.Count > 0)
                 {
-                    sb.AppendLine("<p><strong>Execution Paths:</strong></p><ul class=\"key-flows\">");
+                    sb.AppendLine("<p><strong>Outbound Call Chains:</strong></p><ul class=\"key-flows\">");
                     foreach (var flow in exp.KeyFlows)
                         sb.AppendLine($"<li><code>{Esc(flow.Description)}</code></li>");
                     sb.AppendLine("</ul>");
@@ -321,7 +321,7 @@ public static class HtmlReportGenerator
 
         if (exp.KeyFlows.Count > 0)
         {
-            sb.AppendLine("<h3>Key Flows</h3><ul>");
+            sb.AppendLine("<h3>Outbound Call Chains</h3><ul>");
             foreach (var flow in exp.KeyFlows)
                 sb.AppendLine($"<li><code>{Esc(flow.Description)}</code></li>");
             sb.AppendLine("</ul>");

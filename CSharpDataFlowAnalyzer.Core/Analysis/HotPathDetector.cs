@@ -31,14 +31,22 @@ internal sealed class HotPathDetector
         int medianFanIn = sortedFanIn[sortedFanIn.Count / 2];
         int medianFanOut = sortedFanOut[sortedFanOut.Count / 2];
 
-        // Rank by total connections descending
+        // Rank by total connections descending.
+        // Interfaces and abstract classes are "key abstractions" that appear at the
+        // top of every fan-in chart, but concrete classes are more actionable for
+        // a new developer.  We demote interfaces by halving their effective score
+        // so concrete hot classes surface first, while interfaces are still present.
         var ranked = relationships
             .Select(r => new
             {
                 Relationship = r,
-                TotalConnections = r.FanIn + r.FanOut
+                TotalConnections = r.FanIn + r.FanOut,
+                // Interfaces get a fractional weight so they rank below concrete peers
+                EffectiveScore = r.Kind == "interface"
+                    ? (r.FanIn + r.FanOut) * 0.5
+                    : (double)(r.FanIn + r.FanOut)
             })
-            .OrderByDescending(x => x.TotalConnections)
+            .OrderByDescending(x => x.EffectiveScore)
             .ThenByDescending(x => x.Relationship.FanIn) // break ties by fan-in
             .Take(topN)
             .Select((x, idx) => new HotNode
